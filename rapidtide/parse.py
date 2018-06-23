@@ -7,12 +7,15 @@ Arguments to maybe drop:
 
 - usetmask could just be True if tmaskname is not None
 """
-import os.path as op
+import logging
 import argparse
+import os.path as op
 
 import nibabel as nib
 
 #from rapidtide import rapidtide
+
+LGR = logging.getLogger(__name__)
 
 
 def is_valid_file(parser, arg):
@@ -176,8 +179,9 @@ def get_parser():
                           dest='arbvec',
                           action='store',
                           nargs='+',
-                          type=lambda x: is_two_or_four_floats(parser, x),
-                          metavar='LOWERFREQ UPPERFREQ [LOWERSTOP UPPERSTOP]',
+                          type=lambda x: is_float(parser, x),
+                          metavar=('LOWERFREQ UPPERFREQ',
+                                   'LOWERSTOP UPPERSTOP]'),
                           help=('Filter data and regressors from LOWERFREQ to '
                                 'UPPERFREQ. LOWERSTOP and UPPERSTOP can also '
                                 'be specified, or will be calculated '
@@ -743,6 +747,20 @@ def get_parser():
 def main(argv=None):
     args = vars(get_parser().parse_args(argv))
 
+    if args['arbvec'] is not None:
+        if len(args['arbvec']) not in [2, 4]:
+            raise ValueError('Flag -F must have either 2 or 4 values.')
+        elif len(args['arbvec']) == 2:
+            args['arb_lower'] = args['arbvec'][0]
+            args['arb_upper'] = args['arbvec'][1]
+            args['arb_lowerstop'] = 0.9 * args['arbvec'][0]
+            args['arb_upperstop'] = 1.1 * args['arbvec'][1]
+        elif len(args['arbvec']) == 4:
+            args['arb_lower'] = args['arbvec'][0]
+            args['arb_upper'] = args['arbvec'][1]
+            args['arb_lowerstop'] = args['arbvec'][2]
+            args['arb_upperstop'] = args['arbvec'][3]
+
     if args['offsettime'] is not None:
         args['offsettime_total'] = -1 * args['offsettime']
     else:
@@ -800,16 +818,16 @@ def main(argv=None):
         args['usebutterworthfilter'] = False
 
     if args['venousrefine']:
-        print('WARNING: Using "venousrefine" macro. Overriding any affected '
-              'arguments.')
+        LGR('WARNING: Using "venousrefine" macro. Overriding any affected '
+            'arguments.')
         args['lagminthresh'] = 2.5
         args['lagmaxthresh'] = 6.
         args['ampthresh'] = 0.5
         args['lagmaskside'] = 'upper'
 
     if args['nirs']:
-        print('WARNING: Using "nirs" macro. Overriding any affected '
-              'arguments.')
+        LGR('WARNING: Using "nirs" macro. Overriding any affected '
+            'arguments.')
         args['nothresh'] = False
         args['preservefiltering'] = True
         args['refineprenorm'] = 'var'

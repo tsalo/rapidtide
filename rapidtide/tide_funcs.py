@@ -19,28 +19,24 @@
 # $Id: tide_funcs.py,v 1.4 2016/07/12 13:50:29 frederic Exp $
 #
 from __future__ import print_function, division
-
-import numpy as np
-import scipy as sp
-from scipy import fftpack, ndimage, signal
-from numpy.fft import rfftn, irfftn
-import pylab as pl
-import warnings
-import time
-import sys
-import bisect
 import os
+import sys
+import time
 
-#from scipy import signal
+import warnings
+import pylab as pl
+import numpy as np
+from numpy.fft import rfftn, irfftn
+import scipy as sp
 from scipy.stats import johnsonsb
+from scipy import fftpack, ndimage, signal
 
-
-# ---------------------------------------- Global constants -------------------------------------------
+# ---------------------------------------- Global constants -------------------
 defaultbutterorder = 6
 MAXLINES = 10000000
 donotbeaggressive = True
 
-# ----------------------------------------- Conditional imports ---------------------------------------
+# ----------------------------------------- Conditional imports ---------------
 try:
     from memory_profiler import profile
 
@@ -154,108 +150,8 @@ def version():
         return 'UNKNOWN', 'UNKNOWN'
 
 
-# ---------------------------------------- NIFTI file manipulation ---------------------------
 if nibabelexists:
-    def readfromnifti(inputfile):
-        if os.path.isfile(inputfile):
-            inputfilename = inputfile 
-        elif os.path.isfile(inputfile + '.nii.gz'):
-            inputfilename = inputfile  + '.nii.gz'
-        elif os.path.isfile(inputfile + '.nii'):
-            inputfilename = inputfile + '.nii'
-        else:
-            print('nifti file', inputfile, 'does not exist')
-            sys.exit()
-        nim = nib.load(inputfilename)
-        nim_data = nim.get_data()
-        nim_hdr = nim.get_header()
-        thedims = nim_hdr['dim'].copy()
-        thesizes = nim_hdr['pixdim'].copy()
-        return nim, nim_data, nim_hdr, thedims, thesizes
-
-
-    # dims are the array dimensions along each axis
-    def parseniftidims(thedims):
-        return thedims[1], thedims[2], thedims[3], thedims[4]
-
-
-    # sizes are the mapping between voxels and physical coordinates
-    def parseniftisizes(thesizes):
-        return thesizes[1], thesizes[2], thesizes[3], thesizes[4]
-
-
-    def savetonifti(thearray, theheader, thepixdim, thename):
-        outputaffine = theheader.get_best_affine()
-        qaffine, qcode = theheader.get_qform(coded=True)
-        saffine, scode = theheader.get_sform(coded=True)
-        if theheader['magic'] == 'n+2':
-            output_nifti = nib.Nifti2Image(thearray, outputaffine, header=theheader)
-            suffix = '.nii'
-        else:
-            output_nifti = nib.Nifti1Image(thearray, outputaffine, header=theheader)
-            suffix = '.nii.gz'
-        output_nifti.set_qform(qaffine, code=int(qcode))
-        output_nifti.set_sform(saffine, code=int(scode))
-        output_nifti.to_filename(thename + suffix)
-        output_nifti = None
-
-
-    def checkifnifti(filename):
-        if filename.endswith(".nii") or filename.endswith(".nii.gz"):
-            return True
-        else:
-            return False
-
-
-    def checkiftext(filename):
-        if filename.endswith(".txt"):
-            return True
-        else:
-            return False
-
-
-    def getniftiroot(filename):
-        if filename.endswith(".nii"):
-            return filename[:-4]
-        elif filename.endswith(".nii.gz"):
-            return filename[:-7]
-        else:
-            return filename
-
-
-    def fmritimeinfo(niftifilename):
-        nim = nib.load(niftifilename)
-        hdr = nim.get_header()
-        thedims = hdr['dim']
-        thesizes = hdr['pixdim']
-        if hdr.get_xyzt_units()[1] == 'msec':
-            tr = thesizes[4] / 1000.0
-        else:
-            tr = thesizes[4]
-        timepoints = thedims[4]
-        return tr, timepoints
-
-
-    def checkspacematch(dims1, dims2):
-        for i in range(1, 4):
-            if dims1[i] != dims2[i]:
-                print("File spatial voxels do not match")
-                print("dimension ", i, ":", dims1[i], "!=", dims2[i])
-                return False
-            else:
-                return True
-
-
-    def checktimematch(dims1, dims2, numskip1, numskip2):
-        if (dims1[4] - numskip1) != (dims2[4] - numskip2):
-            print("File numbers of timepoints do not match")
-            print("dimension ", 4, ":", dims1[4],
-                  "(skip ", numskip1, ") !=",
-                  dims2[4],
-                  " (skip ", numskip2, ")")
-            return False
-        else:
-            return True
+    from nifti import *
 
 
 # --------------------------- timing functions -------------------------------------------------
@@ -445,10 +341,6 @@ def zfromr(r, nsamps, dfcorrfac=1.0, oversampfactor=1.0, returnp=False):
         return zval
 
 
-def fisher(r):
-    return 0.5 * np.log((1 + r) / (1 - r))
-
-
 def symmetrize(a, antisymmetric=False, zerodiagonal=False):
     if antisymmetric:
         intermediate = (a - a.T) / 2.0
@@ -505,110 +397,6 @@ def mlregress(x, y, intercept=True):
     return np.atleast_1d(solution[0].T), R
 
 
-# --------------------------- non-NIFTI file I/O functions ------------------------------------------
-def checkifparfile(filename):
-    if filename.endswith(".par"):
-        return True
-    else:
-        return False
-
-
-def readvecs(inputfilename):
-    thefile = open(inputfilename, 'r')
-    lines = thefile.readlines()
-    numvecs = len(lines[0].split())
-    inputvec = np.zeros((numvecs, MAXLINES), dtype='float64')
-    numvals = 0
-    for line in lines:
-        numvals += 1
-        thetokens = line.split()
-        for vecnum in range(0, numvecs):
-            inputvec[vecnum, numvals - 1] = np.float64(thetokens[vecnum])
-    return 1.0 * inputvec[:, 0:numvals]
-
-
-def readvec(inputfilename):
-    inputvec = np.zeros(MAXLINES, dtype='float64')
-    numvals = 0
-    with open(inputfilename, 'r') as thefile:
-        lines = thefile.readlines()
-        for line in lines:
-            numvals += 1
-            inputvec[numvals - 1] = np.float64(line)
-    return 1.0 * inputvec[0:numvals]
-
-
-def readlabels(inputfilename):
-    inputvec = []
-    with open(inputfilename, 'r') as thefile:
-        lines = thefile.readlines()
-        for line in lines:
-            inputvec.append(line.rstrip())
-    return inputvec
-
-
-def writedict(thedict, outputfile, lineend=''):
-    if lineend == 'mac':
-        thelineending = '\r'
-        openmode = 'wb'
-    elif lineend == 'win':
-        thelineending = '\r\n'
-        openmode = 'wb'
-    elif lineend == 'linux':
-        thelineending = '\n'
-        openmode = 'wb'
-    else:
-        thelineending = '\n'
-        openmode = 'w'
-    with open(outputfile, openmode) as FILE:
-        for key, value in sorted(thedict.items()):
-            FILE.writelines(str(key) + ':\t' + str(value) + thelineending)
-
-
-def writevec(thevec, outputfile, lineend=''):
-    if lineend == 'mac':
-        thelineending = '\r'
-        openmode = 'wb'
-    elif lineend == 'win':
-        thelineending = '\r\n'
-        openmode = 'wb'
-    elif lineend == 'linux':
-        thelineending = '\n'
-        openmode = 'wb'
-    else:
-        thelineending = '\n'
-        openmode = 'w'
-    with open(outputfile, openmode) as FILE:
-        for i in thevec:
-            FILE.writelines(str(i) + thelineending)
-
-
-# rewritten to guarantee file closure, combines writenpvec and writenpvecs
-def writenpvecs(thevecs, outputfile, lineend=''):
-    theshape = np.shape(thevecs)
-    if lineend == 'mac':
-        thelineending = '\r'
-        openmode = 'wb'
-    elif lineend == 'win':
-        thelineending = '\r\n'
-        openmode = 'wb'
-    elif lineend == 'linux':
-        thelineending = '\n'
-        openmode = 'wb'
-    else:
-        thelineending = '\n'
-        openmode = 'w'
-    with open(outputfile, openmode) as FILE:
-        if thevecs.ndim == 2:
-            for i in range(0, theshape[1]):
-                for j in range(0, theshape[0]):
-                    FILE.writelines(str(thevecs[j, i]) + '\t')
-                FILE.writelines(thelineending)
-        else:
-            for i in range(0, theshape[0]):
-                FILE.writelines(str(thevecs[i]) + thelineending)
-
-
 # --------------------------- correlation functions -------------------------------------------------
 # The following three functions are taken from the peakdetect distribution by Sixten Bergman
 # They were distributed under the DWTFYWTPL, so I'm relicensing them under Apache 2.0
@@ -656,26 +444,26 @@ def _datacheck_peakdetect(x_axis, y_axis):
 
 def peakdetect(y_axis, x_axis=None, lookahead=200, delta=0.0):
     """
-    Converted from/based on a MATLAB script at: 
+    Converted from/based on a MATLAB script at:
     http://billauer.co.il/peakdet.html
-    
+
     function for detecting local maxima and minima in a signal.
     Discovers peaks by searching for values which are surrounded by lower
     or larger values for maxima and minima respectively
-    
+
     keyword arguments:
     y_axis -- A list containing the signal over which to find peaks
-    
+
     x_axis -- A x-axis whose values correspond to the y_axis list and is used
         in the return to specify the position of the peaks. If omitted an
         index of the y_axis is used.
         (default: None)
-    
+
     lookahead -- distance to look ahead from a peak candidate to determine if
         it is the actual peak
-        (default: 200) 
+        (default: 200)
         '(samples / period) / f' where '4 >= f >= 1.25' might be a good value
-    
+
     delta -- this specifies a minimum difference between a peak and
         the following points, before a peak may be considered a peak. Useful
         to hinder the function from picking up false peaks towards to end of
@@ -683,13 +471,13 @@ def peakdetect(y_axis, x_axis=None, lookahead=200, delta=0.0):
         (default: 0)
             When omitted delta function causes a 20% decrease in speed.
             When used Correctly it can double the speed of the function
-    
-    
+
+
     return: two lists [max_peaks, min_peaks] containing the positive and
         negative peaks respectively. Each cell of the lists contains a tuple
-        of: (position, peak_value) 
+        of: (position, peak_value)
         to get the average peak value do: np.mean(max_peaks, 0)[1] on the
-        results to unpack one of the lists into x, y coordinates do: 
+        results to unpack one of the lists into x, y coordinates do:
         x, y = zip(*max_peaks)
     """
     max_peaks = []
@@ -770,7 +558,8 @@ def peakdetect(y_axis, x_axis=None, lookahead=200, delta=0.0):
     return [max_peaks, min_peaks]
 
 
-def autocorrcheck(corrscale, thexcorr, delta=0.1, acampthresh=0.1, aclagthresh=10.0, displayplots=False, prewindow=True,
+def autocorrcheck(corrscale, thexcorr, delta=0.1, acampthresh=0.1,
+                  aclagthresh=10.0, displayplots=False, prewindow=True,
                   dodetrend=True):
     lookahead = 2
     peaks = peakdetect(thexcorr, x_axis=corrscale, delta=delta, lookahead=lookahead)
@@ -872,9 +661,10 @@ def shorttermcorr_2D(data1, data2, sampletime, windowtime, samplestep=1, laglimi
 def delayedcorr(data1, data2, delayval, timestep):
     return sp.stats.stats.pearsonr(data1, timeshift(data2, delayval/timestep, 30)[0])
 
+
 def cepstraldelay(data1, data2, timestep, displayplots=True):
-    # Choudhary, H., Bahl, R. & Kumar, A. 
-    # Inter-sensor Time Delay Estimation using cepstrum of sum and difference signals in 
+    # Choudhary, H., Bahl, R. & Kumar, A.
+    # Inter-sensor Time Delay Estimation using cepstrum of sum and difference signals in
     #     underwater multipath environment. in 1–7 (IEEE, 2015). doi:10.1109/UT.2015.7108308
     ceps1, _ = complex_cepstrum(data1)
     ceps2, _ = complex_cepstrum(data2)
@@ -909,6 +699,7 @@ def cepstraldelay(data1, data2, timestep, displayplots=True):
         pl.plot(tvec, residual_cepstrum.real)
         pl.show()
     return timestep * np.argmax(residual_cepstrum.real[0:len(residual_cepstrum) // 2])
+
 
 # http://stackoverflow.com/questions/12323959/fast-cross-correlation-method-in-python
 def fastcorrelate(input1, input2, usefft=True, weighting='none', displayplots=False):
@@ -1010,7 +801,7 @@ def weightedfftconvolve(in1, in2, mode="full", weighting='none', displayplots=Fa
         ret *= theorigmax / np.max(np.absolute(ret))
 
     # scale to preserve the maximum
-   
+
 
     if mode == "full":
         return ret
@@ -1047,20 +838,20 @@ def gccproduct(fft1, fft2, weighting, threshfrac=0.1, displayplots=False):
     # now apply it while preserving the max
     theorigmax = np.max(np.absolute(denom))
     thresh = theorigmax * threshfrac
-    if thresh > 0.0: 
+    if thresh > 0.0:
         with np.errstate(invalid='ignore', divide='ignore'):
             return np.nan_to_num(np.where(np.absolute(denom) > thresh, product / denom, np.float64(0.0)))
     else:
         return 0.0 * product
-    
+
 
 #### taken from filtfilt from scipy.org Cookbook http://www.scipy.org/Cookbook/FiltFilt
 def lfilter_zi(b, a):
     # compute the zi state from the filter parameters. see [Gust96].
 
     # Based on:
-    # [Gust96] Fredrik Gustafsson, Determining the initial states in forward-backward 
-    # filtering, IEEE Transactions on Signal Processing, pp. 988--992, April 1996, 
+    # [Gust96] Fredrik Gustafsson, Determining the initial states in forward-backward
+    # filtering, IEEE Transactions on Signal Processing, pp. 988--992, April 1996,
     # Volume 44, Issue 4
 
     n = max(len(a), len(b))
@@ -1499,7 +1290,7 @@ def findmaxlag_gauss(thexcorr_x, thexcorr_y, lagmin, lagmax, widthlimit,
     while (maxindex - j >= lowerlimit) and (thexcorr_y[maxindex - j] > searchfrac * maxval_init) and (j < searchbins):
         j += 1
     j -= 1
-    # This is calculated from first principles, but it's always big by a factor or ~1.4. 
+    # This is calculated from first principles, but it's always big by a factor or ~1.4.
     #     Which makes me think I dropped a factor if sqrt(2).  So fix that with a final division
     maxsigma_init = np.float64(((i + j + 1) * binwidth / (2.0 * np.sqrt(-np.log(searchfrac)))) / np.sqrt(2.0))
     fitstart = lowerlimit
@@ -1609,7 +1400,7 @@ def maxindex_noedge(thexcorr_x, thexcorr_y, bipolar=False):
             upperlim -= 1
             done = False
     return maxindex, flipfac
-    
+
 
 # disabled conditionaljit on 11/8/16.  This causes crashes on some machines (but not mine, strangely enough)
 @conditionaljit2()
@@ -1620,7 +1411,7 @@ def findmaxlag_gauss_rev(thexcorr_x, thexcorr_y, lagmin, lagmax, widthlimit,
                edgebufferfrac=0.0, threshval=0.0, uthreshval=1.0,
                debug=False, tweaklims=True, zerooutbadfit=True, refine=False, maxguess=0.0, useguess=False,
                searchfrac=0.5, fastgauss=False, lagmod=1000.0, enforcethresh=True, displayplots=False):
-    # set initial parameters 
+    # set initial parameters
     # widthlimit is in seconds
     # maxsigma is in Hz
     # maxlag is in seconds
@@ -1675,7 +1466,7 @@ def findmaxlag_gauss_rev(thexcorr_x, thexcorr_y, lagmin, lagmax, widthlimit,
         peakend += 1
     while thegrad[peakstart - 1] > 0.0 and peakpoints[peakstart - 1] == 1:
         peakstart -= 1
-    # This is calculated from first principles, but it's always big by a factor or ~1.4. 
+    # This is calculated from first principles, but it's always big by a factor or ~1.4.
     #     Which makes me think I dropped a factor if sqrt(2).  So fix that with a final division
     maxsigma_init = np.float64(((peakend - peakstart + 1) * binwidth / (2.0 * np.sqrt(-np.log(searchfrac)))) / np.sqrt(2.0))
     if debug:
@@ -2214,63 +2005,6 @@ def timeshift(inputtc, shifttrs, padtrs, doplot=False):
              shifted_weights])
 
 
-# --------------------------- Window functions -------------------------------------------------
-BHwindows = {}
-def blackmanharris(length):
-    #return a0 - a1 * np.cos(argvec) + a2 * np.cos(2.0 * argvec) - a3 * np.cos(3.0 * argvec)
-    try:
-        return BHwindows[str(length)]
-    except:
-        argvec = np.arange(0.0, 2.0 * np.pi, 2.0 * np.pi / float(length))
-        a0 = 0.35875
-        a1 = 0.48829
-        a2 = 0.14128
-        a3 = 0.01168
-        BHwindows[str(length)] = a0 - a1 * np.cos(argvec) + a2 * np.cos(2.0 * argvec) - a3 * np.cos(3.0 * argvec)
-        print('initialized Blackman-Harris window for length', length)
-        return BHwindows[str(length)]
-
-hannwindows = {}
-def hann(length):
-    #return 0.5 * (1.0 - np.cos(np.arange(0.0, 1.0, 1.0 / float(length)) * 2.0 * np.pi))
-    try:
-        return hannwindows[str(length)]
-    except: 
-        hannwindows[str(length)] = 0.5 * (1.0 - np.cos(np.arange(0.0, 1.0, 1.0 / float(length)) * 2.0 * np.pi))
-        print('initialized hann window for length', length)
-        return hannwindows[str(length)]
-
-
-hammingwindows = {}
-def hamming(length):
-#   return 0.54 - 0.46 * np.cos((np.arange(0.0, float(length), 1.0) / float(length)) * 2.0 * np.pi)
-    try:
-        return hammingwindows[str(length)]
-    except:
-        hammingwindows[str(length)] = 0.54 - 0.46 * np.cos((np.arange(0.0, float(length), 1.0) / float(length)) * 2.0 * np.pi)
-        print('initialized hamming window for length', length)
-        return hammingwindows[str(length)]
-
-def windowfunction(length, type='hamming'):
-    if type == 'hamming':
-        return hamming(length)
-    elif type == 'hann':
-        return hann(length)
-    elif type == 'blackmanharris':
-        return blackmanharris(length)
-    elif type == 'None':
-        return np.ones(length)
-    else:
-        print('illegal window function')
-        sys.exit()
-
-
-def envdetect(vector, filtwidth=3.0):
-    demeaned = vector - np.mean(vector)
-    sigabs = abs(demeaned)
-    return dolptrapfftfilt(1.0, 1.0 / (2.0 * filtwidth), 1.1 / (2.0 * filtwidth), sigabs)
-
-
 # --------------------------- Normalization functions -------------------------------------------------
 def znormalize(vector):
     return stdnormalize(vector)
@@ -2520,7 +2254,7 @@ def csdfilter(obsdata, commondata, padlen=20, debug=False):
     filterfunc = np.sqrt(np.abs(fftpack.fft(padobsdata)*np.conj(fftpack.fft(padcommondata))))
     obsdata_trans *= filterfunc
     return unpadvec(fftpack.ifft(obsdata_trans).real, padlen=padlen)
-    
+
 
 def specsplit(samplerate, inputdata, bandwidth, usebutterworth=False):
     lowestfreq = samplerate / (2.0 * np.shape(inputdata)[0])
@@ -2801,80 +2535,3 @@ class noncausalfilter:
         else:
             print("bad filter type")
             sys.exit()
-
-
-# --------------------------- Spectral analysis functions ---------------------------------------
-def phase(mcv):
-    return np.arctan2(mcv.imag, mcv.real)
-
-
-def polarfft(invec, samplerate):
-    if np.shape(invec)[0] % 2 == 1:
-        thevec = invec[:-1]
-    else:
-        thevec = invec
-    spec = fftpack.fft(hamming(np.shape(thevec)[0]) * thevec)[0:np.shape(thevec)[0] // 2]
-    magspec = abs(spec)
-    phspec = phase(spec)
-    maxfreq = samplerate / 2.0
-    freqs = np.arange(0.0, maxfreq, maxfreq / (np.shape(spec)[0]))
-    return freqs, magspec, phspec
-
-
-def complex_cepstrum(x):
-    # adapted from https://github.com/python-acoustics/python-acoustics/blob/master/acoustics/cepstrum.py
-    def _unwrap(phase):
-        samples = phase.shape[-1]
-        unwrapped = np.unwrap(phase)
-        center = (samples + 1) // 2
-        if samples == 1: 
-            center = 0  
-        ndelay = np.array(np.round(unwrapped[...,center]/np.pi))
-        unwrapped -= np.pi * ndelay[...,None] * np.arange(samples) / center
-        return unwrapped, ndelay
-        
-    spectrum = fftpack.fft(x)
-    unwrapped_phase, ndelay = _unwrap(np.angle(spectrum))
-    log_spectrum = np.log(np.abs(spectrum)) + 1j * unwrapped_phase
-    ceps = fftpack.ifft(log_spectrum).real
-    
-    return ceps, ndelay
-
-
-def real_cepstrum(x):
-    # adapted from https://github.com/python-acoustics/python-acoustics/blob/master/acoustics/cepstrum.py
-    return fftpack.ifft(np.log(np.abs(fftpack.fft(x)))).real
-
-
-# --------------------------- Utility functions -------------------------------------------------
-def valtoindex(thearray, thevalue, toleft=True):
-    if toleft:
-        return bisect.bisect_left(thearray, thevalue)
-    else:
-        return bisect.bisect_right(thearray, thevalue)
-
-
-def progressbar(thisval, end_val, label='Percent', barsize=60):
-    percent = float(thisval) / end_val
-    hashes = '#' * int(round(percent * barsize))
-    spaces = ' ' * (barsize - len(hashes))
-    sys.stdout.write("\r{0}: [{1}] {2:.3f}%".format(label, hashes + spaces, 100.0 * percent))
-    sys.stdout.flush()
-
-
-def primes(n):
-    # found on stackoverflow: https://stackoverflow.com/questions/16996217/prime-factorization-list
-    primfac = []
-    d = 2
-    while d*d <= n:
-        while (n % d) == 0:
-            primfac.append(d)  # supposing you want multiple factors repeated
-            n //= d
-        d += 1
-    if n > 1:
-       primfac.append(n)
-    return primfac
-
-
-def largestfac(n):
-    return primes(n)[-1]
