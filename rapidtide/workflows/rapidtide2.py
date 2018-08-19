@@ -23,9 +23,23 @@
 #
 from __future__ import print_function, division
 
+import sys
+import time
+import json
+
 import argparse
+import numpy as np
 import nibabel as nib
 
+try:
+    import mkl
+
+    mklexists = True
+except ImportError:
+    mklexists = False
+
+import rapidtide.io as tide_io
+import rapidtide.util as tide_util
 from .parser_funcs import (is_valid_file, invert_float, is_float)
 
 
@@ -623,6 +637,14 @@ def _get_parser():
                       help=('Enable memory profiling for debugging - '
                             'warning: this slows things down a lot.'),
                       default=False)
+    misc.add_argument('--mklthreads',
+                      dest='mklthreads',
+                      action='store',
+                      type=int,
+                      metavar='NTHREADS',
+                      help=('Use no more than NTHREADS worker threads in '
+                            'accelerated numpy calls.'),
+                      default=1)
     misc.add_argument('--nprocs',
                       dest='nprocs',
                       action='store',
@@ -721,6 +743,7 @@ def rapidtide_workflow(in_file, prefix, venousrefine=False, nirs=False,
                        dodeconv=False, internalprecision='double',
                        isgrayordinate=False, fakerun=False, displayplots=False,
                        nonumba=False, sharedmem=True, memprofile=False,
+                       mklthreads=1,
                        nprocs=1, debug=False, cleanrefined=False,
                        dodispersioncalc=False, fix_autocorrelation=False,
                        tmaskname=None, doprewhiten=False, saveprewhiten=False,
@@ -730,7 +753,1165 @@ def rapidtide_workflow(in_file, prefix, venousrefine=False, nirs=False,
     """
     Run the full rapidtide workflow.
     """
-    pass
+    # set the number of MKL threads to use
+    if mklexists:
+        mkl.set_num_threads(mklthreads)
+
+    # open up the memory usage file
+    if not memprofile:
+        memfile = open(prefix + '_memusage.csv', 'w')
+        tide_util.logmem(None, file=memfile)
+
+    # open the fmri datafile
+    tide_util.logmem('before reading in fmri data', file=memfile)
+    if tide_io.checkiftext(fmrifilename):
+        print('input file is text - all I/O will be to text files')
+        textio = True
+        if dogaussianfilter:
+            dogaussianfilter = False
+            print('gaussian spatial filter disabled for text input files')
+
+    if textio:
+        nim_data = tide_io.readvecs(fmrifilename)
+        theshape = np.shape(nim_data)
+        xsize = theshape[0]
+        ysize = 1
+        numslices = 1
+        fileiscifti = False
+        timepoints = theshape[1]
+        thesizes = [0, int(xsize), 1, 1, int(timepoints)]
+        numspatiallocs = int(xsize)
+        slicesize = numspatiallocs
+    else:
+        nim, nim_data, nim_hdr, thedims, thesizes = tide_io.readfromnifti(fmrifilename)
+        if nim_hdr['intent_code'] == 3002:
+            print('input file is CIFTI')
+            isgrayordinate = True
+            fileiscifti = True
+            timepoints = nim_data.shape[4]
+            numspatiallocs = nim_data.shape[5]
+            slicesize = numspatiallocs
+        else:
+            print('input file is NIFTI')
+            fileiscifti = False
+            xsize, ysize, numslices, timepoints = tide_io.parseniftidims(thedims)
+            numspatiallocs = int(xsize) * int(ysize) * int(numslices)
+            slicesize = numspatiallocs / int(numslices)
+        xdim, ydim, slicethickness, tr = tide_io.parseniftisizes(thesizes)
+    tide_util.logmem('after reading in fmri data', file=memfile)
+
+    # correct some fields if necessary
+    if isgrayordinate:
+        fmritr = 0.72  # this is wrong and is a hack until I can parse CIFTI XML
+    else:
+        if textio:
+            if realtr <= 0.0:
+                print('for text file data input, you must use the -t option '
+                      'to set the timestep')
+                sys.exit()
+        else:
+            if nim_hdr.get_xyzt_units()[1] == 'msec':
+                fmritr = thesizes[4] / 1000.0
+            else:
+                fmritr = thesizes[4]
+    if realtr > 0.0:
+        fmritr = realtr
+
+    # check to see if we need to adjust the oversample factor
+    if oversampfactor < 0:
+        oversampfactor = int(np.ceil(fmritr // 0.5))
+        print('oversample factor set to', oversampfactor)
+
+    oversamptr = fmritr / oversampfactor
+    if verbose:
+        print('fmri data: ', timepoints, ' timepoints, tr = ', fmritr, ', oversamptr =', oversamptr)
+    print(numspatiallocs, ' spatial locations, ', timepoints, ' timepoints')
+    timings.append(['Finish reading fmrifile', time.time(), None, None])
+
+    # if the user has specified start and stop points, limit check, then use these numbers
+    validstart, validend = tide_util.startendcheck(timepoints, startpoint, endpoint)
+    if abs(lagmin) > (validend - validstart + 1) * fmritr / 2.0:
+        print('magnitude of lagmin exceeds', (validend - validstart + 1) * fmritr / 2.0, ' - invalid')
+        sys.exit()
+    if abs(lagmax) > (validend - validstart + 1) * fmritr / 2.0:
+        print('magnitude of lagmax exceeds', (validend - validstart + 1) * fmritr / 2.0, ' - invalid')
+        sys.exit()
+    if dogaussianfilter:
+        print('applying gaussian spatial filter to timepoints ', validstart, ' to ', validend)
+        reportstep = 10
+        for i in range(validstart, validend + 1):
+            if (i % reportstep == 0 or i == validend) and showprogressbar:
+                tide_util.progressbar(i - validstart + 1, timepoints, label='Percent complete')
+            nim_data[:, :, :, i] = tide_filt.ssmooth(xdim, ydim, slicethickness, gausssigma,
+                                                     nim_data[:, :, :, i])
+        timings.append(['End 3D smoothing', time.time(), None, None])
+        print()
+
+    # reshape the data and trim to a time range, if specified.  Check for special case of no trimming to save RAM
+    if (validstart == 0) and (validend == timepoints):
+        fmri_data = nim_data.reshape((numspatiallocs, timepoints))
+    else:
+        fmri_data = nim_data.reshape((numspatiallocs, timepoints))[:, validstart:validend + 1]
+        timepoints = validend - validstart + 1
+
+    # read in the optional masks
+    tide_util.logmem('before setting masks', file=memfile)
+    internalincludemask = None
+    internalexcludemask = None
+    if includemaskname is not None:
+        if textio:
+            theincludemask = tide_io.readvecs(includemaskname).astype('int16')
+            theshape = np.shape(nim_data)
+            theincludexsize = theshape[0]
+            if not theincludexsize == xsize:
+                print('Dimensions of include mask do not match the fmri data - exiting')
+                sys.exit()
+        else:
+            nimincludemask, theincludemask, nimincludemask_hdr, theincludemaskdims, theincludmasksizes = tide_io.readfromnifti(
+                includemaskname)
+            if not tide_io.checkspacematch(nimincludemask_hdr, nim_hdr):
+                print('Dimensions of include mask do not match the fmri data - exiting')
+                sys.exit()
+        internalincludemask = theincludemask.reshape(numspatiallocs)
+    if excludemaskname is not None:
+        if textio:
+            theexcludemask = tide_io.readvecs(excludemaskname).astype('int16')
+            theexcludemask = 1.0 - theexcludemask
+            theshape = np.shape(nim_data)
+            theexcludexsize = theshape[0]
+            if not theexcludexsize == xsize:
+                print('Dimensions of exclude mask do not match the fmri data - exiting')
+                sys.exit()
+        else:
+            (nimexcludemask, theexcludemask, nimexcludemask_hdr,
+             theexcludemaskdims, theexcludmasksizes) = tide_io.readfromnifti(
+                excludemaskname)
+            theexcludemask = 1.0 - theexcludemask
+            if not tide_io.checkspacematch(nimexcludemask_hdr, nim_hdr):
+                print('Dimensions of exclude mask do not match the fmri data - exiting')
+                sys.exit()
+        internalexcludemask = theexcludemask.reshape(numspatiallocs)
+    tide_util.logmem('after setting masks', file=memfile)
+
+    # find the threshold value for the image data
+    tide_util.logmem('before selecting valid voxels', file=memfile)
+    threshval = tide_stats.getfracval(fmri_data[:, addedskip:], 0.98) / 25.0
+    if corrmaskname is not None:
+        if textio:
+            corrmask = tide_io.readvecs(corrmaskname).astype('int16')
+            theshape = np.shape(nim_data)
+            corrxsize = theshape[0]
+            if not corrxsize == xsize:
+                print('Dimensions of correlation mask do not match the fmri data - exiting')
+                sys.exit()
+        else:
+            nimcorrmask, thecorrmask, nimcorrmask_hdr, corrmaskdims, theincludmasksizes = tide_io.readfromnifti(
+                corrmaskname)
+            if not tide_io.checkspacematch(nimcorrmask_hdr, nim_hdr):
+                print('Dimensions of correlation mask do not match the fmri data - exiting')
+                sys.exit()
+            corrmask = np.uint16(np.where(thecorrmask > 0, 1, 0).reshape(numspatiallocs))
+    else:
+        corrmask = np.uint16(tide_stats.makemask(np.mean(fmri_data[:, addedskip:], axis=1),
+                                                 threshpct=corrmaskthreshpct))
+
+    if nothresh:
+        corrmask *= 0
+        corrmask += 1
+        threshval = -10000000.0
+
+    if verbose:
+        print('image threshval =', threshval)
+    validvoxels = np.where(corrmask > 0)[0]
+    numvalidspatiallocs = np.shape(validvoxels)[0]
+    print('validvoxels shape =', numvalidspatiallocs)
+    fmri_data_valid = fmri_data[validvoxels, :] + 0.0
+    print('original size =', np.shape(fmri_data), ', trimmed size =', np.shape(fmri_data_valid))
+    if internalincludemask is not None:
+        internalincludemask_valid = 1.0 * internalincludemask[validvoxels]
+        del internalincludemask
+        print('internalincludemask_valid has size:', internalincludemask_valid.size)
+    else:
+        internalincludemask_valid = None
+    if internalexcludemask is not None:
+        internalexcludemask_valid = 1.0 * internalexcludemask[validvoxels]
+        del internalexcludemask
+        print('internalexcludemask_valid has size:', internalexcludemask_valid.size)
+    else:
+        internalexcludemask_valid = None
+    tide_util.logmem('after selecting valid voxels', file=memfile)
+
+    # move fmri_data_valid into shared memory
+    if sharedmem:
+        print('moving fmri data to shared memory')
+        timings.append(['Start moving fmri_data to shared memory', time.time(), None, None])
+        if memprofile:
+            numpy2shared_func = profile(numpy2shared, precision=2)
+        else:
+            tide_util.logmem('before fmri data move', file=memfile)
+            numpy2shared_func = numpy2shared
+        fmri_data_valid, fmri_data_valid_shared, fmri_data_valid_shared_shape = numpy2shared_func(fmri_data_valid,
+                                                                                                  rt_floatset)
+        timings.append(['End moving fmri_data to shared memory', time.time(), None, None])
+
+    # get rid of memory we aren't using
+    tide_util.logmem('before purging full sized fmri data', file=memfile)
+    del fmri_data
+    del nim_data
+    tide_util.logmem('after purging full sized fmri data', file=memfile)
+
+    # read in the timecourse to resample
+    timings.append(['Start of reference prep', time.time(), None, None])
+    if filename is None:
+        print('no regressor file specified - will use the global mean regressor')
+        useglobalref = True
+
+    if useglobalref:
+        inputfreq = 1.0 / fmritr
+        inputperiod = 1.0 * fmritr
+        inputstarttime = 0.0
+        inputvec = getglobalsignal(fmri_data_valid, optiondict, includemask=internalincludemask_valid,
+                                   excludemask=internalexcludemask_valid)
+        preprocskip = 0
+    else:
+        if inputfreq is None:
+            print('no regressor frequency specified - defaulting to 1/tr')
+            inputfreq = 1.0 / fmritr
+        if inputstarttime is None:
+            print('no regressor start time specified - defaulting to 0.0')
+            inputstarttime = 0.0
+        inputperiod = 1.0 / inputfreq
+        inputvec = tide_io.readvec(filename)
+    numreference = len(inputvec)
+    print('regressor start time, end time, and step', inputstarttime, inputstarttime + numreference * inputperiod,
+          inputperiod)
+
+    if verbose:
+        print('input vector length', len(inputvec), 'input freq', inputfreq, 'input start time', inputstarttime)
+
+    reference_x = np.arange(0.0, numreference) * inputperiod - (inputstarttime + offsettime)
+
+    # Print out initial information
+    if verbose:
+        print('there are ', numreference, ' points in the original regressor')
+        print('the timepoint spacing is ', 1.0 / inputfreq)
+        print('the input timecourse start time is ', inputstarttime)
+
+    # generate the time axes
+    #fmrifreq = 1.0 / fmritr
+    skiptime = fmritr * (preprocskip + addedskip)
+    print('first fMRI point is at ', skiptime, ' seconds relative to time origin')
+    initial_fmri_x = np.arange(0.0, timepoints - addedskip) * fmritr + skiptime
+    os_fmri_x = np.arange(0.0, (timepoints - addedskip) * oversampfactor - (
+            oversampfactor - 1)) * oversamptr + skiptime
+
+    if verbose:
+        print(np.shape(os_fmri_x)[0])
+        print(np.shape(initial_fmri_x)[0])
+
+    # Clip the data
+    if not useglobalref and False:
+        clipstart = bisect.bisect_left(reference_x, os_fmri_x[0] - 2.0 * lagmin)
+        clipend = bisect.bisect_left(reference_x, os_fmri_x[-1] + 2.0 * lagmax)
+        print('clip indices=', clipstart, clipend, reference_x[clipstart], reference_x[clipend], os_fmri_x[0],
+              os_fmri_x[-1])
+
+    # generate the comparison regressor from the input timecourse
+    # correct the output time points
+    # check for extrapolation
+    if os_fmri_x[0] < reference_x[0]:
+        print('WARNING: extrapolating ', os_fmri_x[0] - reference_x[0], ' seconds of data at beginning of timecourse')
+    if os_fmri_x[-1] > reference_x[-1]:
+        print('WARNING: extrapolating ', os_fmri_x[-1] - reference_x[-1], ' seconds of data at end of timecourse')
+
+    # invert the regressor if necessary
+    if invertregressor:
+        invertfac = -1.0
+    else:
+        invertfac = 1.0
+
+    # detrend the regressor if necessary
+    if dodetrend:
+        reference_y = invertfac * tide_fit.detrend(inputvec[0:numreference], demean=dodemean)
+    else:
+        reference_y = invertfac * (inputvec[0:numreference] - np.mean(inputvec[0:numreference]))
+
+    # write out the reference regressor prior to filtering
+    tide_io.writenpvecs(reference_y, prefix + '_reference_origres_prefilt.txt')
+
+    # band limit the regressor if that is needed
+    print('filtering to ', theprefilter.gettype(), ' band')
+    reference_y_classfilter = theprefilter.apply(inputfreq, reference_y)
+    reference_y = reference_y_classfilter
+
+    # write out the reference regressor used
+    tide_io.writenpvecs(tide_math.stdnormalize(reference_y), prefix + '_reference_origres.txt')
+
+    # filter the input data for antialiasing
+    if antialias:
+        if trapezoidalfftfilter:
+            print('applying trapezoidal antialiasing filter')
+            reference_y_filt = tide_filt.dolptrapfftfilt(inputfreq, 0.25 * fmrifreq, 0.5 * fmrifreq, reference_y,
+                                                         padlen=int(inputfreq * padseconds),
+                                                         debug=debug)
+        else:
+            print('applying brickwall antialiasing filter')
+            reference_y_filt = tide_filt.dolpfftfilt(inputfreq, 0.5 * fmrifreq, reference_y,
+                                                     padlen=int(inputfreq * padseconds),
+                                                     debug=debug)
+        reference_y = rt_floatset(reference_y_filt.real)
+
+    warnings.filterwarnings('ignore', 'Casting*')
+
+    if fakerun:
+        sys.exit()
+
+    # write out the resampled reference regressors
+    if dodetrend:
+        resampnonosref_y = tide_fit.detrend(
+            tide_resample.doresample(reference_x, reference_y, initial_fmri_x, method=interptype),
+            demean=dodemean)
+        resampref_y = tide_fit.detrend(
+            tide_resample.doresample(reference_x, reference_y, os_fmri_x, method=interptype),
+            demean=dodemean)
+    else:
+        resampnonosref_y = tide_resample.doresample(reference_x, reference_y, initial_fmri_x,
+                                                    method=interptype)
+        resampref_y = tide_resample.doresample(reference_x, reference_y, os_fmri_x, method=interptype)
+
+    # prepare the temporal mask
+    if usetmask:
+        tmask_y = maketmask(tmaskname, reference_x, rt_floatset(reference_y))
+        tmaskos_y = tide_resample.doresample(reference_x, tmask_y, os_fmri_x, method=interptype)
+        tide_io.writenpvecs(tmask_y, prefix + '_temporalmask.txt')
+        resampnonosref_y *= tmask_y
+        thefit, R = tide_fit.mlregress(tmask_y, resampnonosref_y)
+        resampnonosref_y -= thefit[0, 1] * tmask_y
+        resampref_y *= tmaskos_y
+        thefit, R = tide_fit.mlregress(tmaskos_y, resampref_y)
+        resampref_y -= thefit[0, 1] * tmaskos_y
+
+    if passes > 1:
+        nonosrefname = '_reference_fmrires_pass1.txt'
+        osrefname = '_reference_resampres_pass1.txt'
+    else:
+        nonosrefname = '_reference_fmrires.txt'
+        osrefname = '_reference_resampres.txt'
+
+    tide_io.writenpvecs(tide_math.stdnormalize(resampnonosref_y), prefix + nonosrefname)
+    tide_io.writenpvecs(tide_math.stdnormalize(resampref_y), prefix + osrefname)
+    timings.append(['End of reference prep', time.time(), None, None])
+
+    corrtr = oversamptr
+    if verbose:
+        print('corrtr=', corrtr)
+
+    numccorrlags = 2 * oversampfactor * (timepoints - addedskip) - 1
+    corrscale = np.arange(0.0, numccorrlags) * corrtr - (numccorrlags * corrtr) / 2.0 + (oversampfactor - 0.5) * corrtr
+    corrorigin = numccorrlags // 2 + 1
+    lagmininpts = int((-lagmin / corrtr) - 0.5)
+    lagmaxinpts = int((lagmax / corrtr) + 0.5)
+    if verbose:
+        print('corrorigin at point ', corrorigin, corrscale[corrorigin])
+        print('corr range from ', corrorigin - lagmininpts, '(', corrscale[
+            corrorigin - lagmininpts], ') to ', corrorigin + lagmaxinpts, '(', corrscale[corrorigin + lagmaxinpts], ')')
+
+    if savecorrtimes:
+        tide_io.writenpvecs(corrscale[corrorigin - lagmininpts:corrorigin + lagmaxinpts], prefix + '_corrtimes.txt')
+
+    # allocate all of the data arrays
+    tide_util.logmem('before main array allocation', file=memfile)
+    if textio:
+        nativespaceshape = xsize
+        nativearmodelshape = (xsize, armodelorder)
+    else:
+        if fileiscifti:
+            nativespaceshape = (1, 1, 1, 1, numspatiallocs)
+            nativearmodelshape = (1, 1, 1, armodelorder, numspatiallocs)
+        else:
+            nativespaceshape = (xsize, ysize, numslices)
+            nativearmodelshape = (xsize, ysize, numslices, armodelorder)
+    internalspaceshape = numspatiallocs
+    internalarmodelshape = (numspatiallocs, armodelorder)
+    internalvalidspaceshape = numvalidspatiallocs
+    internalvalidarmodelshape = (numvalidspatiallocs, armodelorder)
+    meanval = np.zeros(internalvalidspaceshape, dtype=rt_floattype)
+    lagtimes = np.zeros(internalvalidspaceshape, dtype=rt_floattype)
+    lagstrengths = np.zeros(internalvalidspaceshape, dtype=rt_floattype)
+    lagsigma = np.zeros(internalvalidspaceshape, dtype=rt_floattype)
+    lagmask = np.zeros(internalvalidspaceshape, dtype='uint16')
+    R2 = np.zeros(internalvalidspaceshape, dtype=rt_floattype)
+    outmaparray = np.zeros(internalspaceshape, dtype=rt_floattype)
+    outarmodelarray = np.zeros(internalarmodelshape, dtype=rt_floattype)
+    tide_util.logmem('after main array allocation', file=memfile)
+
+    corroutlen = np.shape(corrscale[corrorigin - lagmininpts:corrorigin + lagmaxinpts])[0]
+    if textio:
+        nativecorrshape = (xsize, corroutlen)
+    else:
+        if fileiscifti:
+            nativecorrshape = (1, 1, 1, corroutlen, numspatiallocs)
+        else:
+            nativecorrshape = (xsize, ysize, numslices, corroutlen)
+    internalcorrshape = (numspatiallocs, corroutlen)
+    internalvalidcorrshape = (numvalidspatiallocs, corroutlen)
+    print('allocating memory for correlation arrays', internalcorrshape, internalvalidcorrshape)
+    if sharedmem:
+        corrout, dummy, dummy = allocshared(internalvalidcorrshape, rt_floatset)
+        gaussout, dummy, dummy = allocshared(internalvalidcorrshape, rt_floatset)
+        outcorrarray, dummy, dummy = allocshared(internalcorrshape, rt_floatset)
+    else:
+        corrout = np.zeros(internalvalidcorrshape, dtype=rt_floattype)
+        gaussout = np.zeros(internalvalidcorrshape, dtype=rt_floattype)
+        outcorrarray = np.zeros(internalcorrshape, dtype=rt_floattype)
+    tide_util.logmem('after correlation array allocation', file=memfile)
+
+    if textio:
+        nativefmrishape = (xsize, np.shape(initial_fmri_x)[0])
+    else:
+        if fileiscifti:
+            nativefmrishape = (1, 1, 1, np.shape(initial_fmri_x)[0], numspatiallocs)
+        else:
+            nativefmrishape = (xsize, ysize, numslices, np.shape(initial_fmri_x)[0])
+    internalfmrishape = (numspatiallocs, np.shape(initial_fmri_x)[0])
+    internalvalidfmrishape = (numvalidspatiallocs, np.shape(initial_fmri_x)[0])
+    lagtc = np.zeros(internalvalidfmrishape, dtype=rt_floattype)
+    tide_util.logmem('after lagtc array allocation', file=memfile)
+
+    if passes > 1:
+        if sharedmem:
+            shiftedtcs, dummy, dummy = allocshared(internalvalidfmrishape, rt_floatset)
+            weights, dummy, dummy = allocshared(internalvalidfmrishape, rt_floatset)
+        else:
+            shiftedtcs = np.zeros(internalvalidfmrishape, dtype=rt_floattype)
+            weights = np.zeros(internalvalidfmrishape, dtype=rt_floattype)
+        tide_util.logmem('after refinement array allocation', file=memfile)
+    if sharedmem:
+        outfmriarray, dummy, dummy = allocshared(internalfmrishape, rt_floatset)
+    else:
+        outfmriarray = np.zeros(internalfmrishape, dtype=rt_floattype)
+
+    # prepare for fast resampling
+    padvalue = max((-lagmin, lagmax)) + 30.0
+    # print('setting up fast resampling with padvalue =',padvalue)
+    numpadtrs = int(padvalue // fmritr)
+    padvalue = fmritr * numpadtrs
+    genlagtc = tide_resample.fastresampler(reference_x, reference_y, padvalue=padvalue)
+
+    # cycle over all voxels
+    refine = True
+    if verbose:
+        print('refine is set to ', refine)
+    edgebufferfrac = max([edgebufferfrac, 2.0 / np.shape(corrscale)[0]])
+    if verbose:
+        print('edgebufferfrac set to ', edgebufferfrac)
+
+    fft_fmri_data = None
+    sidelobe_dict = {}
+    for thepass in range(1, passes + 1):
+        # initialize the pass
+        if passes > 1:
+            print('\n\n*********************')
+            print('Pass number ', thepass)
+
+        referencetc = tide_math.corrnormalize(resampref_y, usewindowfunc, dodetrend,
+                                              windowfunc=windowfunc)
+        nonosreferencetc = tide_math.corrnormalize(resampnonosref_y, usewindowfunc,
+                                                   dodetrend, windowfunc=windowfunc)
+        oversampfreq = oversampfactor / fmritr
+
+        # Step -1 - check the regressor for periodic components in the passband
+        dolagmod = True
+        doreferencenotch = False
+        if check_autocorrelation:
+            print('checking reference regressor autocorrelation properties')
+            lagmod = 1000.0
+            lagindpad = corrorigin - 2 * np.max((lagmininpts, lagmaxinpts))
+            acmininpts = lagmininpts + lagindpad
+            acmaxinpts = lagmaxinpts + lagindpad
+            thexcorr, dummy = tide_corrpass.onecorrelation(referencetc,
+                                                           oversampfreq,
+                                                           corrorigin,
+                                                           acmininpts,
+                                                           acmaxinpts,
+                                                           theprefilter,
+                                                           referencetc,
+                                                           optiondict)
+            outputarray = np.asarray([corrscale[corrorigin - acmininpts:corrorigin + acmaxinpts], thexcorr])
+            tide_io.writenpvecs(outputarray, prefix + '_referenceautocorr_pass' + str(thepass) + '.txt')
+            thelagthresh = np.max((abs(lagmin), abs(lagmax)))
+            theampthresh = 0.1
+            print('searching for sidelobes with amplitude >', theampthresh, 'with abs(lag) <', thelagthresh, 's')
+            sidelobetime, sidelobeamp = tide_corr.autocorrcheck(
+                corrscale[corrorigin - acmininpts:corrorigin + acmaxinpts],
+                thexcorr, acampthresh=theampthresh,
+                aclagthresh=thelagthresh,
+                prewindow=usewindowfunc,
+                dodetrend=dodetrend)
+            if sidelobetime is not None:
+                passsuffix = '_pass' + str(thepass + 1)
+                sidelobe_dict['acsidelobelag' + passsuffix] = sidelobetime
+                despeckle_thresh = np.max([despeckle_thresh, sidelobetime / 2.0])
+                sidelobe_dict['acsidelobeamp' + passsuffix] = sidelobeamp
+                print('\n\nWARNING: autocorrcheck found bad sidelobe at', sidelobetime, 'seconds (', 1.0 / sidelobetime,
+                      'Hz)...')
+                tide_io.writenpvecs(np.array([sidelobetime]),
+                                    prefix + '_autocorr_sidelobetime' + passsuffix + '.txt')
+                if fix_autocorrelation:
+                    print('Removing sidelobe')
+                    if dolagmod:
+                        print('subjecting lag times to modulus')
+                        lagmod = sidelobetime / 2.0
+                    if doreferencenotch:
+                        print('removing spectral component at sidelobe frequency')
+                        acstopfreq = 1.0 / sidelobetime
+                        acfixfilter = tide_filt.noncausalfilter(debug=debug)
+                        acfixfilter.settype('arb_stop')
+                        acfixfilter.setarb(acstopfreq * 0.9, acstopfreq * 0.95, acstopfreq * 1.05, acstopfreq * 1.1)
+                        cleaned_referencetc = tide_math.stdnormalize(acfixfilter.apply(fmrifreq, referencetc))
+                        cleaned_nonosreferencetc = tide_math.stdnormalize(acfixfilter.apply(fmrifreq, nonosreferencetc))
+                        tide_io.writenpvecs(cleaned_referencetc,
+                                            prefix + '_cleanedreference_pass' + str(thepass) + '.txt')
+                else:
+                    cleaned_referencetc = 1.0 * referencetc
+                    cleaned_nonosreferencetc = 1.0 * nonosreferencetc
+            else:
+                print('no sidelobes found in range')
+                cleaned_referencetc = 1.0 * referencetc
+                cleaned_nonosreferencetc = 1.0 * nonosreferencetc
+        else:
+            cleaned_referencetc = 1.0 * referencetc
+            cleaned_nonosreferencetc = 1.0 * nonosreferencetc
+
+        # Step 0 - estimate significance
+        if numestreps > 0:
+            timings.append(['Significance estimation start, pass ' + str(thepass), time.time(), None, None])
+            print('\n\nSignificance estimation, pass ' + str(thepass))
+            if verbose:
+                print('calling getNullDistributionData with args:', oversampfreq, fmritr, corrorigin, lagmininpts,
+                      lagmaxinpts)
+            if memprofile:
+                getNullDistributionData_func = profile(tide_nullcorr.getNullDistributionData, precision=2)
+            else:
+                tide_util.logmem('before getnulldistristributiondata', file=memfile)
+                getNullDistributionData_func = tide_nullcorr.getNullDistributionData
+            corrdistdata = getNullDistributionData_func(cleaned_referencetc,
+                                                        corrscale,
+                                                        theprefilter,
+                                                        oversampfreq,
+                                                        corrorigin,
+                                                        lagmininpts,
+                                                        lagmaxinpts,
+                                                        optiondict,
+                                                        rt_floatset=rt_floatset,
+                                                        rt_floattype=rt_floattype
+                                                        )
+            tide_io.writenpvecs(corrdistdata, prefix + '_corrdistdata_pass' + str(thepass) + '.txt')
+
+            # calculate percentiles for the crosscorrelation from the distribution data
+            sighistlen = 1000
+            thepercentiles = np.array([0.95, 0.99, 0.995, 0.999])
+            thepvalnames = []
+            for thispercentile in thepercentiles:
+                thepvalnames.append("{:.3f}".format(1.0 - thispercentile).replace('.', 'p'))
+
+            pcts, pcts_fit, sigfit = tide_stats.sigFromDistributionData(corrdistdata, sighistlen,
+                                                                        thepercentiles, twotail=bipolar,
+                                                                        displayplots=displayplots,
+                                                                        nozero=nohistzero,
+                                                                        dosighistfit=dosighistfit)
+            if ampthreshfromsig:
+                print('setting ampthresh to the p<', "{:.3f}".format(1.0 - thepercentiles[0]), ' threshhold')
+                ampthresh = pcts[2]
+            tide_stats.printthresholds(pcts, thepercentiles, 'Crosscorrelation significance thresholds from data:')
+            if dosighistfit:
+                tide_stats.printthresholds(pcts_fit, thepercentiles,
+                                           'Crosscorrelation significance thresholds from fit:')
+                tide_stats.makeandsavehistogram(corrdistdata, sighistlen, 0,
+                                                prefix + '_nullcorrelationhist_pass' + str(thepass),
+                                                displaytitle='Null correlation histogram, pass' + str(thepass),
+                                                displayplots=displayplots, refine=False)
+            del corrdistdata
+            timings.append(['Significance estimation end, pass ' + str(thepass), time.time(), numestreps,
+                            'repetitions'])
+
+        # Step 1 - Correlation step
+        print('\n\nCorrelation calculation, pass ' + str(thepass))
+        timings.append(['Correlation calculation start, pass ' + str(thepass), time.time(), None, None])
+        if memprofile:
+            correlationpass_func = profile(tide_corrpass.correlationpass, precision=2)
+        else:
+            tide_util.logmem('before correlationpass', file=memfile)
+            correlationpass_func = tide_corrpass.correlationpass
+        voxelsprocessed_cp, theglobalmaxlist = correlationpass_func(fmri_data_valid[:,
+                                                                    addedskip:],
+                                                                    fft_fmri_data,
+                                                                    cleaned_referencetc,
+                                                                    initial_fmri_x,
+                                                                    os_fmri_x,
+                                                                    fmritr,
+                                                                    corrorigin,
+                                                                    lagmininpts,
+                                                                    lagmaxinpts,
+                                                                    corrout,
+                                                                    meanval,
+                                                                    theprefilter,
+                                                                    optiondict,
+                                                                    rt_floatset=rt_floatset,
+                                                                    rt_floattype=rt_floattype
+                                                                    )
+        for i in range(len(theglobalmaxlist)):
+            theglobalmaxlist[i] = corrscale[theglobalmaxlist[i]]
+        tide_stats.makeandsavehistogram(np.asarray(theglobalmaxlist), len(corrscale), 0,
+                                        prefix + '_globallaghist_pass' + str(thepass),
+                                        displaytitle='lagtime histogram', displayplots=displayplots,
+                                        therange=(corrscale[0], corrscale[-1]), refine=False)
+        timings.append(['Correlation calculation end, pass ' + str(thepass), time.time(), voxelsprocessed_cp, 'voxels'])
+
+        # Step 2 - correlation fitting and time lag estimation
+        print('\n\nTime lag estimation pass ' + str(thepass))
+        timings.append(['Time lag estimation start, pass ' + str(thepass), time.time(), None, None])
+
+        if memprofile:
+            fitcorr_func = profile(tide_corrfit.fitcorr, precision=2)
+        else:
+            tide_util.logmem('before fitcorr', file=memfile)
+            fitcorr_func = tide_corrfit.fitcorr
+        voxelsprocessed_fc = fitcorr_func(genlagtc,
+                                          initial_fmri_x,
+                                          lagtc,
+                                          slicesize,
+                                          corrscale[corrorigin - lagmininpts:corrorigin + lagmaxinpts],
+                                          lagmask,
+                                          lagtimes,
+                                          lagstrengths,
+                                          lagsigma,
+                                          corrout,
+                                          meanval,
+                                          gaussout,
+                                          R2,
+                                          optiondict,
+                                          rt_floatset=rt_floatset,
+                                          rt_floattype=rt_floattype
+                                          )
+        timings.append(['Time lag estimation end, pass ' + str(thepass), time.time(), voxelsprocessed_fc, 'voxels'])
+
+        # Step 2b - Correlation time despeckle
+        if despeckle_passes > 0:
+            print('\n\nCorrelation despeckling pass ' + str(thepass))
+            print('\tUsing despeckle_thresh =' + str(despeckle_thresh))
+            timings.append(['Correlation despeckle start, pass ' + str(thepass), time.time(), None, None])
+
+            # find lags that are very different from their neighbors, and refit starting at the median lag for the point
+            voxelsprocessed_fc_ds = 0
+            for despecklepass in range(despeckle_passes):
+                print('\n\nCorrelation despeckling subpass ' + str(despecklepass + 1))
+                outmaparray *= 0.0
+                outmaparray[validvoxels] = eval('lagtimes')[:]
+                medianlags = ndimage.median_filter(outmaparray.reshape(nativespaceshape), 3).reshape(numspatiallocs)
+                initlags = \
+                    np.where(np.abs(outmaparray - medianlags) > despeckle_thresh, medianlags, -1000000.0)[
+                        validvoxels]
+                if len(initlags) > 0:
+                    voxelsprocessed_fc_ds += fitcorr_func(genlagtc,
+                                                          initial_fmri_x,
+                                                          lagtc,
+                                                          slicesize,
+                                                          corrscale[corrorigin - lagmininpts:corrorigin + lagmaxinpts],
+                                                          lagmask,
+                                                          lagtimes,
+                                                          lagstrengths,
+                                                          lagsigma,
+                                                          corrout,
+                                                          meanval,
+                                                          gaussout,
+                                                          R2,
+                                                          optiondict,
+                                                          initiallags=initlags,
+                                                          rt_floatset=rt_floatset,
+                                                          rt_floattype=rt_floattype)
+                else:
+                    print('Nothing left to do! Terminating despeckling')
+                    break
+
+            print('\n\n', voxelsprocessed_fc_ds, 'voxels despeckled in', despeckle_passes, 'passes')
+            timings.append(
+                ['Correlation despeckle end, pass ' + str(thepass), time.time(), voxelsprocessed_fc_ds, 'voxels'])
+
+        # Step 3 - regressor refinement for next pass
+        if thepass < passes:
+            print('\n\nRegressor refinement, pass' + str(thepass))
+            timings.append(['Regressor refinement start, pass ' + str(thepass), time.time(), None, None])
+            if refineoffset:
+                peaklag, peakheight, peakwidth = tide_stats.gethistprops(lagtimes[np.where(lagmask > 0)],
+                                                                         histlen)
+                offsettime = peaklag
+                offsettime_total += peaklag
+                print('offset time set to ', offsettime, ', total is ', offsettime_total)
+
+            # regenerate regressor for next pass
+            if memprofile:
+                refineregressor_func = profile(tide_refine.refineregressor, precision=2)
+            else:
+                tide_util.logmem('before refineregressor', file=memfile)
+                refineregressor_func = tide_refine.refineregressor
+            voxelsprocessed_rr, outputdata, refinemask = refineregressor_func(
+                fmri_data_valid[:, :],
+                fmritr,
+                shiftedtcs,
+                weights,
+                thepass,
+                lagstrengths,
+                lagtimes,
+                lagsigma,
+                R2,
+                theprefilter,
+                optiondict,
+                padtrs=numpadtrs,
+                includemask=internalincludemask_valid,
+                excludemask=internalexcludemask_valid,
+                rt_floatset=rt_floatset,
+                rt_floattype=rt_floattype)
+            normoutputdata = tide_math.stdnormalize(theprefilter.apply(fmrifreq, outputdata))
+            tide_io.writenpvecs(normoutputdata, prefix + '_refinedregressor_pass' + str(thepass) + '.txt')
+
+            if dodetrend:
+                resampnonosref_y = tide_fit.detrend(
+                    tide_resample.doresample(initial_fmri_x, normoutputdata, initial_fmri_x,
+                                             method=interptype),
+                    demean=dodemean)
+                resampref_y = tide_fit.detrend(tide_resample.doresample(initial_fmri_x, normoutputdata, os_fmri_x,
+                                                                        method=interptype),
+                                               demean=dodemean)
+            else:
+                resampnonosref_y = tide_resample.doresample(initial_fmri_x, normoutputdata, initial_fmri_x,
+                                                            method=interptype)
+                resampref_y = tide_resample.doresample(initial_fmri_x, normoutputdata, os_fmri_x,
+                                                       method=interptype)
+            if usetmask:
+                resampnonosref_y *= tmask_y
+                thefit, R = tide_fit.mlregress(tmask_y, resampnonosref_y)
+                resampnonosref_y -= thefit[0, 1] * tmask_y
+                resampref_y *= tmaskos_y
+                thefit, R = tide_fit.mlregress(tmaskos_y, resampref_y)
+                resampref_y -= thefit[0, 1] * tmaskos_y
+
+            # reinitialize lagtc for resampling
+            genlagtc = tide_resample.fastresampler(initial_fmri_x, normoutputdata, padvalue=padvalue)
+            nonosrefname = '_reference_fmrires_pass' + str(thepass + 1) + '.txt'
+            osrefname = '_reference_resampres_pass' + str(thepass + 1) + '.txt'
+            tide_io.writenpvecs(tide_math.stdnormalize(resampnonosref_y), prefix + nonosrefname)
+            tide_io.writenpvecs(tide_math.stdnormalize(resampref_y), prefix + osrefname)
+            timings.append(
+                ['Regressor refinement end, pass ' + str(thepass), time.time(), voxelsprocessed_rr, 'voxels'])
+
+    # Post refinement step 0 - Wiener deconvolution
+    if dodeconv:
+        timings.append(['Wiener deconvolution start', time.time(), None, None])
+        print('\n\nWiener deconvolution')
+        reportstep = 1000
+
+        # now allocate the arrays needed for Wiener deconvolution
+        wienerdeconv = np.zeros(internalvalidspaceshape, dtype=rt_outfloattype)
+        wpeak = np.zeros(internalvalidspaceshape, dtype=rt_outfloattype)
+
+        if memprofile:
+            wienerpass_func = profile(tide_wiener.wienerpass, precision=2)
+        else:
+            tide_util.logmem('before wienerpass', file=memfile)
+            wienerpass_func = tide_wiener.wienerpass
+        voxelsprocessed_wiener = wienerpass_func(numspatiallocs,
+                                                 reportstep,
+                                                 fmri_data_valid,
+                                                 threshval,
+                                                 optiondict,
+                                                 wienerdeconv,
+                                                 wpeak,
+                                                 resampref_y,
+                                                 rt_floatset=rt_floatset,
+                                                 rt_floattype=rt_floattype
+                                                 )
+        timings.append(['Wiener deconvolution end', time.time(), voxelsprocessed_wiener, 'voxels'])
+
+    # Post refinement step 1 - GLM fitting to remove moving signal
+    if doglmfilt or doprewhiten:
+        timings.append(['GLM filtering start', time.time(), None, None])
+        if doglmfilt:
+            print('\n\nGLM filtering')
+        if doprewhiten:
+            print('\n\nPrewhitening')
+        reportstep = 1000
+        if dogaussianfilter or (glmsourcefile is not None):
+            if glmsourcefile is not None:
+                print('reading in ', glmsourcefile, 'for GLM filter, please wait')
+                if textio:
+                    nim_data = tide_io.readvecs(glmsourcefile)
+                else:
+                    nim, nim_data, nim_hdr, thedims, thesizes = tide_io.readfromnifti(glmsourcefile)
+            else:
+                print('rereading', fmrifilename, ' for GLM filter, please wait')
+                if textio:
+                    nim_data = tide_io.readvecs(fmrifilename)
+                else:
+                    nim, nim_data, nim_hdr, thedims, thesizes = tide_io.readfromnifti(fmrifilename)
+            fmri_data_valid = (nim_data.reshape((numspatiallocs, timepoints))[:, validstart:validend + 1])[validvoxels,
+                              :] + 0.0
+
+            # move fmri_data_valid into shared memory
+            if sharedmem:
+                print('moving fmri data to shared memory')
+                timings.append(['Start moving fmri_data to shared memory', time.time(), None, None])
+                if memprofile:
+                    numpy2shared_func = profile(numpy2shared, precision=2)
+                else:
+                    tide_util.logmem('before movetoshared (glm)', file=memfile)
+                    numpy2shared_func = numpy2shared
+                fmri_data_valid, fmri_data_valid_shared, fmri_data_valid_shared_shape = numpy2shared_func(
+                    fmri_data_valid, rt_floatset)
+                timings.append(['End moving fmri_data to shared memory', time.time(), None, None])
+            del nim_data
+
+        # now allocate the arrays needed for GLM filtering
+        meanvalue = np.zeros(internalvalidspaceshape, dtype=rt_outfloattype)
+        rvalue = np.zeros(internalvalidspaceshape, dtype=rt_outfloattype)
+        r2value = np.zeros(internalvalidspaceshape, dtype=rt_outfloattype)
+        fitNorm = np.zeros(internalvalidspaceshape, dtype=rt_outfloattype)
+        fitcoff = np.zeros(internalvalidspaceshape, dtype=rt_outfloattype)
+        if sharedmem:
+            datatoremove, dummy, dummy = allocshared(internalvalidfmrishape, rt_outfloatset)
+            filtereddata, dummy, dummy = allocshared(internalvalidfmrishape, rt_outfloatset)
+        else:
+            datatoremove = np.zeros(internalvalidfmrishape, dtype=rt_outfloattype)
+            filtereddata = np.zeros(internalvalidfmrishape, dtype=rt_outfloattype)
+        if doprewhiten:
+            prewhiteneddata = np.zeros(internalvalidfmrishape, dtype=rt_outfloattype)
+            arcoffs = np.zeros(internalvalidarmodelshape, dtype=rt_outfloattype)
+
+        if memprofile:
+            memcheckpoint('about to start glm noise removal...')
+        else:
+            tide_util.logmem('before glm', file=memfile)
+
+        if preservefiltering:
+            for i in range(len(validvoxels)):
+                fmri_data_valid[i] = theprefilter.apply(fmrifreq, fmri_data_valid[i])
+        if memprofile:
+            glmpass_func = profile(tide_glmpass.glmpass, precision=2)
+        else:
+            tide_util.logmem('before glmpass', file=memfile)
+            glmpass_func = tide_glmpass.glmpass
+        voxelsprocessed_glm = glmpass_func(numvalidspatiallocs,
+                                           fmri_data_valid,
+                                           threshval,
+                                           lagtc,
+                                           meanvalue,
+                                           rvalue,
+                                           r2value,
+                                           fitcoff,
+                                           fitNorm,
+                                           datatoremove,
+                                           filtereddata,
+                                           reportstep=reportstep,
+                                           nprocs=nprocs,
+                                           showprogressbar=showprogressbar,
+                                           addedskip=addedskip,
+                                           mp_chunksize=mp_chunksize,
+                                           rt_floatset=rt_floatset,
+                                           rt_floattype=rt_floattype
+                                           )
+        del fmri_data_valid
+
+        timings.append(['GLM filtering end, pass ' + str(thepass), time.time(), voxelsprocessed_glm, 'voxels'])
+        if memprofile:
+            memcheckpoint('...done')
+        else:
+            tide_util.logmem('after glm filter', file=memfile)
+        if doprewhiten:
+            arcoff_ref = pacf_yw(resampref_y, nlags=armodelorder)[1:]
+            print('\nAR coefficient(s) for reference waveform: ', arcoff_ref)
+            resampref_y_pw = rt_floatset(prewhiten(resampref_y, arcoff_ref))
+        else:
+            resampref_y_pw = rt_floatset(resampref_y)
+        if usewindowfunc:
+            referencetc_pw = tide_math.stdnormalize(
+                tide_filt.windowfunction(np.shape(resampref_y_pw)[0], type=windowfunc) * tide_fit.detrend(
+                    tide_math.stdnormalize(resampref_y_pw))) / \
+                             np.shape(resampref_y_pw)[0]
+        else:
+            referencetc_pw = tide_math.stdnormalize(tide_fit.detrend(tide_math.stdnormalize(resampref_y_pw))) / \
+                             np.shape(
+                                 resampref_y_pw)[0]
+        print('')
+        if displayplots:
+            fig = figure()
+            ax = fig.add_subplot(111)
+            ax.set_title('initial and prewhitened reference')
+            plot(os_fmri_x, referencetc, os_fmri_x, referencetc_pw)
+    else:
+        # get the original data to calculate the mean
+        print('rereading', fmrifilename, ' for GLM filter, please wait')
+        if textio:
+            nim_data = tide_io.readvecs(fmrifilename)
+        else:
+            nim, nim_data, nim_hdr, thedims, thesizes = tide_io.readfromnifti(fmrifilename)
+        fmri_data = nim_data.reshape((numspatiallocs, timepoints))[:, validstart:validend + 1]
+        meanvalue = np.mean(fmri_data, axis=1)
+
+    # Post refinement step 2 - prewhitening
+    if doprewhiten:
+        print('Step 3 - reprocessing prewhitened data')
+        timings.append(['Step 3 start', time.time(), None, None])
+        dummy, dummy = tide_corrpass.correlationpass(prewhiteneddata,
+                                                     fft_fmri_data,
+                                                     referencetc_pw,
+                                                     initial_fmri_x,
+                                                     os_fmri_x,
+                                                     fmritr,
+                                                     corrorigin,
+                                                     lagmininpts,
+                                                     lagmaxinpts,
+                                                     corrout,
+                                                     meanval,
+                                                     theprefilter,
+                                                     optiondict,
+                                                     rt_floatset = rt_floatset,
+                                                     rt_floattype = rt_floattype
+                                                     )
+
+    # Post refinement step 3 - make and save interesting histograms
+    timings.append(['Start saving histograms', time.time(), None, None])
+    tide_stats.makeandsavehistogram(lagtimes[np.where(lagmask > 0)], histlen, 0, prefix + '_laghist',
+                                    displaytitle='lagtime histogram', displayplots=displayplots,
+                                    refine=False)
+    tide_stats.makeandsavehistogram(lagstrengths[np.where(lagmask > 0)], histlen, 0,
+                                    prefix + '_strengthhist',
+                                    displaytitle='lagstrength histogram', displayplots=displayplots,
+                                    therange=(0.0, 1.0))
+    tide_stats.makeandsavehistogram(lagsigma[np.where(lagmask > 0)], histlen, 1,
+                                    prefix + '_widthhist',
+                                    displaytitle='lagsigma histogram', displayplots=displayplots)
+    if doglmfilt:
+        tide_stats.makeandsavehistogram(r2value[np.where(lagmask > 0)], histlen, 1, prefix + '_Rhist',
+                                        displaytitle='correlation R2 histogram',
+                                        displayplots=displayplots)
+    timings.append(['Finished saving histograms', time.time(), None, None])
+
+    # Post refinement step 4 - save out all of the important arrays to nifti files
+    # write out the options used
+    tide_io.writedict(optiondict, prefix + '_options.txt')
+
+    if fileiscifti:
+        outsuffix3d = '.dscalar'
+        outsuffix4d = '.dtseries'
+    else:
+        outsuffix3d = ''
+        outsuffix4d = ''
+
+    # do ones with one time point first
+    timings.append(['Start saving maps', time.time(), None, None])
+    if not textio:
+        theheader = nim_hdr
+        if fileiscifti:
+            theheader['intent_code'] = 3006
+        else:
+            theheader['dim'][0] = 3
+            theheader['dim'][4] = 1
+
+    # first generate the MTT map
+    MTT = np.square(lagsigma) - (acwidth * acwidth)
+    MTT = np.where(MTT > 0.0, np.sqrt(MTT), 0.0)
+
+    for mapname in ['lagtimes', 'lagstrengths', 'R2', 'lagsigma', 'lagmask', 'MTT']:
+        if memprofile:
+            memcheckpoint('about to write ' + mapname)
+        else:
+            tide_util.logmem('about to write ' + mapname, file=memfile)
+        outmaparray[:] = 0.0
+        outmaparray[validvoxels] = eval(mapname)[:]
+        if textio:
+            tide_io.writenpvecs(outmaparray.reshape(nativespaceshape, 1),
+                                prefix + '_' + mapname + outsuffix3d + '.txt')
+        else:
+            tide_io.savetonifti(outmaparray.reshape(nativespaceshape), theheader, thesizes,
+                                prefix + '_' + mapname + outsuffix3d)
+
+    if doglmfilt:
+        for mapname, mapsuffix in [('rvalue', 'fitR'), ('r2value', 'fitR2'), ('meanvalue', 'mean'),
+                                   ('fitcoff', 'fitcoff'), ('fitNorm', 'fitNorm')]:
+            if memprofile:
+                memcheckpoint('about to write ' + mapname)
+            else:
+                tide_util.logmem('about to write ' + mapname, file=memfile)
+            outmaparray[:] = 0.0
+            outmaparray[validvoxels] = eval(mapname)[:]
+            if textio:
+                tide_io.writenpvecs(outmaparray.reshape(nativespaceshape),
+                                    prefix + '_' + mapsuffix + outsuffix3d + '.txt')
+            else:
+                tide_io.savetonifti(outmaparray.reshape(nativespaceshape), theheader, thesizes,
+                                    prefix + '_' + mapsuffix + outsuffix3d)
+        del rvalue
+        del r2value
+        del meanvalue
+        del fitcoff
+        del fitNorm
+    else:
+        for mapname, mapsuffix in [('meanvalue', 'mean')]:
+            if memprofile:
+                memcheckpoint('about to write ' + mapname)
+            else:
+                tide_util.logmem('about to write ' + mapname, file=memfile)
+            outmaparray[:] = 0.0
+            outmaparray = eval(mapname)[:]
+            if textio:
+                tide_io.writenpvecs(outmaparray.reshape(nativespaceshape),
+                                    prefix + '_' + mapsuffix + outsuffix3d + '.txt')
+            else:
+                tide_io.savetonifti(outmaparray.reshape(nativespaceshape), theheader, thesizes,
+                                    prefix + '_' + mapsuffix + outsuffix3d)
+        del meanvalue
+
+    if numestreps > 0:
+        for i in range(0, len(thepercentiles)):
+            pmask = np.where(np.abs(lagstrengths) > pcts[i], lagmask, 0 * lagmask)
+            if dosighistfit:
+                tide_io.writenpvecs(sigfit, prefix + '_sigfit' + '.txt')
+            tide_io.writenpvecs(np.array([pcts[i]]), prefix + '_p_lt_' + thepvalnames[i] + '_thresh.txt')
+            outmaparray[:] = 0.0
+            outmaparray[validvoxels] = pmask[:]
+            if textio:
+                tide_io.writenpvecs(outmaparray.reshape(nativespaceshape),
+                                    prefix + '_p_lt_' + thepvalnames[i] + '_mask' + outsuffix3d + '.txt')
+            else:
+                tide_io.savetonifti(outmaparray.reshape(nativespaceshape), theheader, thesizes,
+                                    prefix + '_p_lt_' + thepvalnames[i] + '_mask' + outsuffix3d)
+
+    if passes > 1:
+        outmaparray[:] = 0.0
+        outmaparray[validvoxels] = refinemask[:]
+        if textio:
+            tide_io.writenpvecs(outfmriarray.reshape(nativefmrishape),
+                                prefix + '_lagregressor' + outsuffix4d + '.txt')
+        else:
+            tide_io.savetonifti(outmaparray.reshape(nativespaceshape), theheader, thesizes,
+                                prefix + '_refinemask' + outsuffix3d)
+        del refinemask
+
+    # clean up arrays that will no longer be needed
+    del lagtimes
+    del lagstrengths
+    del lagsigma
+    del R2
+    del lagmask
+
+    # now do the ones with other numbers of time points
+    if not textio:
+        theheader = nim_hdr
+        if fileiscifti:
+            theheader['intent_code'] = 3002
+        else:
+            theheader['dim'][4] = np.shape(corrscale)[0]
+        theheader['toffset'] = corrscale[corrorigin - lagmininpts]
+        theheader['pixdim'][4] = corrtr
+    outcorrarray[:, :] = 0.0
+    outcorrarray[validvoxels, :] = gaussout[:, :]
+    if textio:
+        tide_io.writenpvecs(outcorrarray.reshape(nativecorrshape),
+                            prefix + '_gaussout' + outsuffix4d + '.txt')
+    else:
+        tide_io.savetonifti(outcorrarray.reshape(nativecorrshape), theheader, thesizes,
+                            prefix + '_gaussout' + outsuffix4d)
+    del gaussout
+
+    outcorrarray[:, :] = 0.0
+    outcorrarray[validvoxels, :] = corrout[:, :]
+    if textio:
+        tide_io.writenpvecs(outcorrarray.reshape(nativecorrshape),
+                            prefix + '_corrout' + outsuffix4d + '.txt')
+    else:
+        tide_io.savetonifti(outcorrarray.reshape(nativecorrshape), theheader, thesizes,
+                            prefix + '_corrout' + outsuffix4d)
+    del corrout
+
+    if saveprewhiten:
+        if not textio:
+            theheader = nim.header
+            theheader['toffset'] = 0.0
+            if fileiscifti:
+                theheader['intent_code'] = 3002
+            else:
+                theheader['dim'][4] = armodelorder
+        outarmodelarray[validvoxels, :] = arcoffs[:, :]
+        if textio:
+            tide_io.writenpvecs(outarmodelarray.reshape(nativearmodelshape),
+                                prefix + '_arN' + outsuffix4d + '.txt')
+        else:
+            tide_io.savetonifti(outarmodelarray.reshape(nativearmodelshape), theheader, thesizes,
+                                prefix + '_arN' + outsuffix4d)
+        del arcoffs
+
+    if not textio:
+        theheader = nim_hdr
+        theheader['pixdim'][4] = fmritr
+        theheader['toffset'] = 0.0
+        if fileiscifti:
+            theheader['intent_code'] = 3002
+        else:
+            theheader['dim'][4] = np.shape(initial_fmri_x)[0]
+
+    if savelagregressors:
+        outfmriarray[validvoxels, :] = lagtc[:, :]
+        if textio:
+            tide_io.writenpvecs(outfmriarray.reshape(nativefmrishape),
+                                prefix + '_lagregressor' + outsuffix4d + '.txt')
+        else:
+            tide_io.savetonifti(outfmriarray.reshape(nativefmrishape), theheader, thesizes,
+                                prefix + '_lagregressor' + outsuffix4d)
+        del lagtc
+
+    if passes > 1:
+        if savelagregressors:
+            outfmriarray[validvoxels, :] = shiftedtcs[:, :]
+            if textio:
+                tide_io.writenpvecs(outfmriarray.reshape(nativefmrishape),
+                                    prefix + '_shiftedtcs' + outsuffix4d + '.txt')
+            else:
+                tide_io.savetonifti(outfmriarray.reshape(nativefmrishape), theheader, thesizes,
+                                    prefix + '_shiftedtcs' + outsuffix4d)
+        del shiftedtcs
+
+    if doglmfilt and saveglmfiltered:
+        del datatoremove
+        outfmriarray[validvoxels, :] = filtereddata[:, :]
+        if textio:
+            tide_io.writenpvecs(outfmriarray.reshape(nativefmrishape),
+                                prefix + '_filtereddata' + outsuffix4d + '.txt')
+        else:
+            tide_io.savetonifti(outfmriarray.reshape(nativefmrishape), theheader, thesizes,
+                                prefix + '_filtereddata' + outsuffix4d)
+        del filtereddata
+
+    if saveprewhiten:
+        outfmriarray[validvoxels, :] = prewhiteneddata[:, :]
+        if textio:
+            tide_io.writenpvecs(outfmriarray.reshape(nativefmrishape),
+                                prefix + '_prewhiteneddata' + outsuffix4d + '.txt')
+        else:
+            tide_io.savetonifti(outfmriarray.reshape(nativefmrishape), theheader, thesizes,
+                                prefix + '_prewhiteneddata' + outsuffix4d)
+        del prewhiteneddata
+
+    timings.append(['Finished saving maps', time.time(), None, None])
+    memfile.close()
+    print('done')
+
+    if displayplots:
+        show()
+    timings.append(['Done', time.time(), None, None])
+
+    # Post refinement step 5 - process and save timing information
+    nodeline = 'Processed on ' + platform.node()
+    tide_util.proctiminginfo(timings, outputfile=prefix + '_runtimings.txt', extraheader=nodeline)
 
 
 def _main(argv=None):
@@ -817,6 +1998,10 @@ def _main(argv=None):
         args['refineprenorm'] = 'var'
         args['ampthresh'] = 0.7
         args['lagmaskthresh'] = 0.1
+
+    # write out the command used
+    with open(prefix+'_call.json', 'w') as fo:
+        json.dump(args, fo)
 
     rapidtide_workflow(**args)
 
