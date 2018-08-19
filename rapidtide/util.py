@@ -262,7 +262,42 @@ def savecommandline(theargs, thename):
     tide_io.writevec([' '.join(theargs)], thename + '_commandline.txt')
 
 
-def valtoindex(thearray, thevalue, toleft=True):
+def startendcheck(timepoints, startpoint, endpoint):
+    """
+
+    Parameters
+    ----------
+    timepoints
+    startpoint
+    endpoint
+
+    Returns
+    -------
+
+    """
+    if startpoint > timepoints - 1:
+        print('startpoint is too large (maximum is ', timepoints - 1, ')')
+        sys.exit()
+    if startpoint < 0:
+        realstart = 0
+        print('startpoint set to minimum, (0)')
+    else:
+        realstart = startpoint
+        print('startpoint set to ', startpoint)
+    if endpoint > timepoints - 1:
+        realend = timepoints - 1
+        print('endppoint set to maximum, (', timepoints - 1, ')')
+    else:
+        realend = endpoint
+        print('endpoint set to ', endpoint)
+    if realstart >= realend:
+        print('endpoint (', realend, ') must be greater than startpoint (', realstart, ')')
+        sys.exit()
+    return realstart, realend
+
+
+
+def valtoindex(thearray, thevalue, circular=True, toleft=True):
     """
 
     Parameters
@@ -275,10 +310,25 @@ def valtoindex(thearray, thevalue, toleft=True):
     -------
 
     """
+    closestidx = (np.abs(thearray - thevalue)).argmin()
+    if (thevalue - thearray[closestidx]) >= 0.0:
+        if toleft:
+            return np.max([0, closestidx - 1])
+        else:
+            return closestidx
+    else:
+        if toleft:
+            return closestidx
+        else:
+            return np.max([0, closestidx - 1])
+    return closestidx
+
+    """
     if toleft:
         return bisect.bisect_left(thearray, thevalue)
     else:
         return bisect.bisect_right(thearray, thevalue)
+    """
 
 
 def progressbar(thisval, end_val, label='Percent', barsize=60):
