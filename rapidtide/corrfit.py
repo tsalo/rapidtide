@@ -34,15 +34,17 @@ import rapidtide.multiproc as tide_multiproc
 import rapidtide.util as tide_util
 
 
-def onecorrfitx(thetc,
-               corrscale,
-               optiondict,
-               disablethresholds=False,
-               displayplots=False,
-               initiallag=None,
-               rt_floatset=np.float64,
-               rt_floattype='float64'
-               ):
+def onecorrfitx(thetc, corrscale, optiondict, disablethresholds=False,
+                displayplots=False, initiallag=None,
+                rt_floatset=np.float64, rt_floattype='float64'):
+    """
+    optiondict : dict
+        Dictionary with fields: despeckle_thresh, widthlimit, lthreshval,
+        bipolar, fixdelay, findmaxtype, lagmin, lagmax, absmaxsigma,
+        edgebufferfrac, uthreshval, debug, gaussrefine, searchfrac,
+        fastgauss, enforcethresh, zerooutbadfit, lagmod, hardlimit,
+        fixeddelayvalue, showprogressbar, nprocs, mp_chunksize
+    """
     if initiallag is not None:
         maxguess = initiallag
         useguess = True
@@ -68,28 +70,34 @@ def onecorrfitx(thetc,
 
     if not optiondict['fixdelay']:
         if optiondict['findmaxtype'] == 'gauss':
-            maxindex, maxlag, maxval, maxsigma, maskval, failreason, peakstart, peakend = tide_fit.findmaxlag_gauss_rev(
-                corrscale,
-                thetc,
-                optiondict['lagmin'], optiondict['lagmax'], widthlimit,
-                absmaxsigma=optiondict['absmaxsigma'],
-                edgebufferfrac=optiondict['edgebufferfrac'],
-                threshval=thethreshval,
-                uthreshval=optiondict['uthreshval'],
-                debug=optiondict['debug'],
-                refine=optiondict['gaussrefine'],
-                bipolar=optiondict['bipolar'],
-                maxguess=maxguess,
-                useguess=useguess,
-                searchfrac=optiondict['searchfrac'],
-                fastgauss=optiondict['fastgauss'],
-                enforcethresh=optiondict['enforcethresh'],
-                zerooutbadfit=optiondict['zerooutbadfit'],
-                lagmod=optiondict['lagmod'],
-                hardlimit=optiondict['hardlimit'],
-                displayplots=displayplots)
+            (maxindex, maxlag, maxval, maxsigma,
+             maskval, failreason,
+             peakstart, peakend) = tide_fit.findmaxlag_gauss_rev(
+                 corrscale,
+                 thetc,
+                 optiondict['lagmin'],
+                 optiondict['lagmax'],
+                 widthlimit,
+                 absmaxsigma=optiondict['absmaxsigma'],
+                 edgebufferfrac=optiondict['edgebufferfrac'],
+                 threshval=thethreshval,
+                 uthreshval=optiondict['uthreshval'],
+                 debug=optiondict['debug'],
+                 refine=optiondict['gaussrefine'],
+                 bipolar=optiondict['bipolar'],
+                 maxguess=maxguess,
+                 useguess=useguess,
+                 searchfrac=optiondict['searchfrac'],
+                 fastgauss=optiondict['fastgauss'],
+                 enforcethresh=optiondict['enforcethresh'],
+                 zerooutbadfit=optiondict['zerooutbadfit'],
+                 lagmod=optiondict['lagmod'],
+                 hardlimit=optiondict['hardlimit'],
+                 displayplots=displayplots)
         else:
-            maxindex, maxlag, maxval, maxsigma, maskval, failreason, peakstart, peakend = tide_fit.findmaxlag_quad(
+            (maxindex, maxlag, maxval, maxsigma,
+             maskval, failreason,
+             peakstart, peakend) = tide_fit.findmaxlag_quad(
                 corrscale,
                 flipfac * thetc,
                 optiondict['lagmin'], optiondict['lagmax'], widthlimit,
@@ -115,26 +123,20 @@ def onecorrfitx(thetc,
         maxsigma = rt_floatset(1.0)
         maskval = np.uint16(1)
 
-    return maxindex, maxlag, maxval, maxsigma, maskval, peakstart, peakend, failreason
+    return (maxindex, maxlag, maxval, maxsigma,
+            maskval, peakstart, peakend, failreason)
 
 
-def _procOneVoxelFitcorrx(vox,
-                         corrtc,
-                         corrscale,
-                         genlagtc,
-                         initial_fmri_x,
-                         optiondict,
-                         displayplots=False,
-                         initiallag=None,
-                         rt_floatset=np.float64,
-                         rt_floattype='float64'):
-    maxindex, maxlag, maxval, maxsigma, maskval, peakstart, peakend, failreason = onecorrfitx(corrtc,
-                                                                                             corrscale,
-                                                                                             optiondict,
-                                                                                             displayplots=displayplots,
-                                                                                             initiallag=initiallag,
-                                                                                             rt_floatset=rt_floatset,
-                                                                                             rt_floattype=rt_floattype)
+def _procOneVoxelFitcorrx(vox, corrtc, corrscale, genlagtc, initial_fmri_x,
+                          optiondict, displayplots=False, initiallag=None,
+                          rt_floatset=np.float64, rt_floattype='float64'):
+    (maxindex, maxlag, maxval, maxsigma,
+     maskval, peakstart, peakend,
+     failreason) = onecorrfitx(corrtc, corrscale, optiondict,
+                               displayplots=displayplots,
+                               initiallag=initiallag,
+                               rt_floatset=rt_floatset,
+                               rt_floattype=rt_floattype)
 
     if maxval > 0.3:
         displayplots = False
@@ -457,24 +459,10 @@ def _procOneVoxelFitcorr(vox,
     return vox, volumetotalinc, thelagtc, thetime, thestrength, thesigma, thegaussout, theR2, maskval, failreason
 
 
-def fitcorr(genlagtc,
-            initial_fmri_x,
-            lagtc,
-            slicesize,
-            corrscale,
-            lagmask,
-            lagtimes,
-            lagstrengths,
-            lagsigma,
-            corrout,
-            meanval,
-            gaussout,
-            R2,
-            optiondict,
-            initiallags=None,
-            rt_floatset=np.float64,
-            rt_floattype='float64'
-            ):
+def fitcorr(genlagtc, initial_fmri_x, lagtc, slicesize, corrscale,
+            lagmask, lagtimes, lagstrengths, lagsigma,
+            corrout, meanval, gaussout, R2, optiondict, initiallags=None,
+            rt_floatset=np.float64, rt_floattype='float64'):
     displayplots = False
     inputshape = np.shape(corrout)
     if initiallags is None:
@@ -572,7 +560,8 @@ def fitcorr(genlagtc,
 
                 volumetotal += volumetotalinc
     print('\nCorrelation fitted in ' + str(volumetotal) + ' voxels')
-    print('\tampfails=', ampfails, ' lagfails=', lagfails, ' widthfail=', widthfails, ' edgefail=', edgefails,
+    print('\tampfails=', ampfails, ' lagfails=', lagfails,
+          ' widthfail=', widthfails, ' edgefail=', edgefails,
           ' fitfail=', fitfails)
 
     # garbage collect

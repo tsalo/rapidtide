@@ -46,12 +46,13 @@ def onecorrelation(thetc,
     thetc_classfilter = ncprefilter.apply(oversampfreq, thetc)
     thetc = thetc_classfilter
 
-    # prepare timecourse by normalizing, detrending, and applying a window function 
-    preppedtc = tide_math.corrnormalize(thetc, optiondict['usewindowfunc'], optiondict['dodetrend'],
+    # prepare timecourse by normalizing, detrending, and applying a window function
+    preppedtc = tide_math.corrnormalize(thetc, optiondict['dodetrend'],
                                         windowfunc=optiondict['windowfunc'])
 
     # now actually do the correlation
-    thexcorr = tide_corr.fastcorrelate(preppedtc, referencetc, usefft=True, weighting=optiondict['corrweighting'])
+    thexcorr = tide_corr.fastcorrelate(preppedtc, referencetc, usefft=True,
+                                       weighting=optiondict['corrweighting'])
 
     # find the global maximum value
     theglobalmax = np.argmax(thexcorr)

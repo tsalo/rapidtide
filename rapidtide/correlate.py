@@ -95,7 +95,8 @@ def disablenumba():
 
 
 # --------------------------- Correlation functions -------------------------------------------------
-def autocorrcheck(corrscale, thexcorr, delta=0.1, acampthresh=0.1, aclagthresh=10.0, displayplots=False, prewindow=True,
+def autocorrcheck(corrscale, thexcorr, delta=0.1, acampthresh=0.1,
+                  aclagthresh=10.0, displayplots=False, prewindow=True,
                   dodetrend=True):
     """
 

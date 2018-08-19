@@ -325,15 +325,16 @@ def ppnormalize(vector):
 
 
 @conditionaljit()
-def corrnormalize(thedata, prewindow, dodetrend, windowfunc='hamming'):
+def corrnormalize(thedata, dodetrend, windowfunc='hamming'):
     """
 
     Parameters
     ----------
     thedata
-    prewindow
-    dodetrend
-    windowfunc
+    dodetrend : :obj:`bool`
+        Whether to detrend timeseries or not.
+    windowfunc : {'hamming', None}, optional
+        Window function to use. If None, no windowing is done.
 
     Returns
     -------
@@ -346,9 +347,9 @@ def corrnormalize(thedata, prewindow, dodetrend, windowfunc='hamming'):
         intervec = stdnormalize(thedata)
 
     # then window
-    if prewindow:
-        return stdnormalize(tide_filt.windowfunction(np.shape(thedata)[0],
-                                                     type=windowfunc) * intervec) / np.sqrt(np.shape(thedata)[0])
+    if windowfunc:
+        return stdnormalize(tide_filt.windowfunction(
+            np.shape(thedata)[0], type=windowfunc) * intervec) / np.sqrt(np.shape(thedata)[0])
     else:
         return stdnormalize(intervec) / np.sqrt(np.shape(thedata)[0])
 

@@ -149,6 +149,7 @@ def logmem(msg, file=None):
     """
     global lastmaxrss_parent, lastmaxrss_child
     if msg is None:
+        open_type = 'w'
         lastmaxrss_parent = 0
         lastmaxrss_child = 0
         logline = ','.join([
@@ -170,6 +171,7 @@ def logmem(msg, file=None):
             'Children IO Page Fault'
             'Children Swap Out'])
     else:
+        open_type = 'a'
         rcusage = resource.getrusage(resource.RUSAGE_SELF)
         outvals = [msg]
         outvals.append(str(rcusage.ru_maxrss))
@@ -192,10 +194,12 @@ def logmem(msg, file=None):
         outvals.append(str(rcusage.ru_majflt))
         outvals.append(str(rcusage.ru_nswap))
         logline = ','.join(outvals)
+
     if file is None:
         print(logline)
     else:
-        file.writelines(logline + "\n")
+        with open(file, open_type) as fo:
+            fo.writelines(logline + "\n")
 
 
 def findexecutable(command):
@@ -286,7 +290,7 @@ def startendcheck(timepoints, startpoint, endpoint):
         print('startpoint set to ', startpoint)
     if endpoint > timepoints - 1:
         realend = timepoints - 1
-        print('endppoint set to maximum, (', timepoints - 1, ')')
+        print('endpoint set to maximum, (', timepoints - 1, ')')
     else:
         realend = endpoint
         print('endpoint set to ', endpoint)
@@ -456,7 +460,7 @@ def comparemap(map1, map2, mask=None):
         if map1.shape != mask.shape:
             print('comparemap: mask does not have the same shape as the maps - aborting')
             sys.exit()
-    else:  
+    else:
         mask = map1 * 0 + 1
 
     validvoxels = np.where(mask > 0)[0]
