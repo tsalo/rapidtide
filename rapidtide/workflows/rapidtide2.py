@@ -29,6 +29,7 @@ import json
 import warnings
 
 import argparse
+import platform
 import numpy as np
 import nibabel as nib
 
@@ -821,6 +822,7 @@ def rapidtide_workflow(in_file, prefix, venousrefine=False, nirs=False,
     outputprecision = 'single'
     mp_chunksize = 50000
     acwidth = 0.0
+    saveglmfiltered = True
     if isgrayordinate:
         datatype = 'cifti'
 
@@ -2113,7 +2115,8 @@ def rapidtide_workflow(in_file, prefix, venousrefine=False, nirs=False,
 
     # Post refinement step 5 - process and save timing information
     nodeline = 'Processed on {0}'.format(platform.node())
-    tide_util.proctiminginfo(timings, outputfile=prefix + '_runtimings.txt', extraheader=nodeline)
+    tide_util.proctiminginfo(timings, outputfile=prefix + '_runtimings.txt',
+                             extraheader=nodeline)
 
 
 def _main(argv=None):
