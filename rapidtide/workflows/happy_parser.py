@@ -37,7 +37,7 @@ def _get_parser():
     """
     parser = argparse.ArgumentParser(prog='happy',
                                      description='Hypersampling by Analytic Phase Projection - Yay!.',
-                                     usage='%(prog)s fmrifile slicetimefile outputroot [options]')
+                                     )
 
     # Required arguments
     parser.add_argument(
@@ -118,14 +118,10 @@ def _get_parser():
     preprocessing_opts.add_argument(
         '--motionfile',
         dest='motionfilename',
-        metavar='MOTFILE[:COLSPEC]',
-        help=('Read 6 columns of motion regressors out of MOTFILE text file '
+        metavar='MOTFILE',
+        help=('Read 6 columns of motion regressors out of MOTFILE file (.par or BIDS .json) '
               '(with timepoints rows) and regress them, their derivatives, '
-              'and delayed derivatives out of the data prior to analysis. '
-              'If COLSPEC is present, use the comma separated list of ranges to '
-              'specify X, Y, Z, RotX, RotY, and RotZ, in that order.  For '
-              'example, :3-5,7,0,9 would use columns 3, 4, 5, 7, 0 and 9 '
-              'for X, Y, Z, RotX, RotY, RotZ, respectively.'),
+              'and delayed derivatives out of the data prior to analysis. '),
         default=None)
     preprocessing_opts.add_argument(
         '--motionhp',
@@ -280,6 +276,19 @@ def _get_parser():
         action='store_true',
         help='Generate voxelwise aliased synthetic cardiac regressors and filter them out of the input data. ',
         default=False)
+
+    # Output options
+    output = parser.add_argument_group("Output options")
+    output.add_argument(
+        "--legacyoutput",
+        dest="bidsoutput",
+        action="store_false",
+        help=(
+            "Use legacy file naming and formats rather than BIDS naming and "
+            "format conventions for output files."
+        ),
+        default=True,
+    )
 
     # Phase projection tuning
     phase_proj_tuning = parser.add_argument_group('Phase projection tuning')
@@ -493,8 +502,8 @@ def process_args(inputargs=None):
     args.upsamplefac = 100
     args.centric = True
     args.pulsereconstepsize = 0.01
-    args.aliasedcorrelationwidth = 1.25
-    args.aliasedcorrelationpts = 101
+    args.aliasedcorrelationwidth = 5
+    args.aliasedcorrelationpts = 201
     args.unnormvesselmap = True
     args.histlen = 100
     args.softvesselfrac = 0.4

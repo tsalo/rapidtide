@@ -479,7 +479,9 @@ def process_args():
     optiondict['refineincludevals'] = None        # list of integer values to use in the mask
     optiondict['corrmaskvallist'] = None
     optiondict['refinetype'] = 'unweighted_average'
-    optiondict['estimatePCAdims'] = False
+    optiondict['convergencethresh'] = None
+    optiondict['maxpasses'] = 10
+    optiondict['PCAtarget'] = 0.8
     optiondict['filterbeforePCA'] = True
     optiondict['fmrifreq'] = 0.0
     optiondict['dodispersioncalc'] = False
@@ -516,6 +518,7 @@ def process_args():
     optiondict['savedespecklemasks'] = True
     optiondict['checkpoint'] = False                    # save checkpoint information for tracking program state
     optiondict['alwaysmultiproc'] = False
+    optiondict['calccoherence'] = False
 
     # package options
     optiondict['memprofilerexists'] = memprofilerexists

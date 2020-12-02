@@ -80,6 +80,10 @@ ENV PATH="/usr/local/miniconda/bin:$PATH" \
     PYTHONNOUSERSITE=1
 
 
+# Update to the newest version of conda
+RUN conda update -n base -c defaults conda
+
+
 # Installing precomputed python packages
 RUN df -h
 RUN conda config --add channels conda-forge
@@ -98,7 +102,8 @@ RUN conda install -y python=3.7.6 \
                      statsmodels=0.11.1 \
                      scikit-image=0.17.2 \
                      scikit-learn=0.23.1 \
-                     nibabel=3.1.0 \
+                     nibabel=3.2.0 \
+                     nilearn=0.6.2 \
                      keras=2.2.4 \
                      tensorflow=1.13.1 \
                      pyqtgraph=0.11.0 \
@@ -144,7 +149,7 @@ LABEL org.label-schema.name="rapidtide" \
       org.label-schema.description="rapidtide - a set of tools for delay processing" \
       org.label-schema.url="http://nirs-fmri.net" \
       org.label-schema.vcs-url="https://github.com/bbfrederick/rapidtide" \
-      org.label-schema.version="2.0alpha4"
+      org.label-schema.version="2.0alpha7"
 
 # this is nominally the correct way to do this, but it doesn't work
 ARG VERSION

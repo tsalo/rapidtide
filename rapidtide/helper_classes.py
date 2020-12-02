@@ -195,7 +195,7 @@ class similarityfunctionator:
     def getfunction(self, trim=True):
         if self.datavalid:
             if trim:
-                 return self.trim(self.thesimfunc), self.trim(self.timeaxis), self.theglobalmax
+                return self.trim(self.thesimfunc), self.trim(self.timeaxis), self.theglobalmax
             else:
                 return self.thesimfunc, self.timeaxis, self.theglobalmax
         else:
@@ -386,6 +386,173 @@ class correlator(similarityfunctionator):
             return self.trim(self.thesimfunc), self.trim(self.timeaxis), self.theglobalmax
         else:
             return self.thesimfunc, self.timeaxis, self.theglobalmax
+
+
+class coherer:
+    reftc = None
+    prepreftc = None
+    testtc = None
+    preptesttc = None
+    freqaxis = None
+    similarityfunclen = 0
+    datavalid = False
+    freqaxisvalid = False
+    similarityfuncorigin = 0
+    freqmin = None
+    freqmax = None
+
+    def __init__(self,
+                 Fs=0.0,
+                 freqmin=None,
+                 freqmax=None,
+                 ncprefilter=None,
+                 reftc=None,
+                 detrendorder=1,
+                 windowfunc='hamming',
+                 debug=False):
+        self.Fs = Fs
+        self.ncprefilter = ncprefilter
+        self.reftc = reftc
+        self.windowfunc = windowfunc
+        self.detrendorder = detrendorder
+        self.debug = debug
+        if freqmin is not None:
+            self.freqmin = freqmin
+        if freqmax is not None:
+            self.freqmax = freqmax
+        if self.reftc is not None:
+            self.setreftc(self.reftc)
+        if self.debug:
+            print('coherer init:')
+            print('\tFs:', self.Fs)
+            print('\twindowfunc:', self.windowfunc)
+            print('\tdetrendorder:', self.detrendorder)
+            print('\tfreqmin:', self.freqmin)
+            print('\tfreqmax:', self.freqmax)
+
+
+    def preptc(self, thetc):
+        # prepare timecourse by filtering, normalizing, detrending, and applying a window function
+        return tide_math.corrnormalize(self.ncprefilter.apply(self.Fs, thetc),
+                                       detrendorder=self.detrendorder,
+                                       windowfunc='None')
+
+    def setlimits(self, freqmin, freqmax):
+        self.freqmin = freqmin
+        self.freqmax = freqmax
+        if self.freqaxisvalid:
+            self.freqmininpts = np.max([0, tide_util.valtoindex(self.freqaxis, self.freqmin)])
+            self.freqmaxinpts = np.min([tide_util.valtoindex(self.freqaxis, self.freqmax), len(self.freqaxis) - 1])
+        if self.debug:
+            print('setlimits:')
+            print('\tfreqmin,freqmax:', self.freqmin, self.freqmax)
+            print('\tfreqmininpts,freqmaxinpts:', self.freqmininpts, self.freqmaxinpts)
+
+
+    def getaxisinfo(self):
+        return self.freqaxis[self.freqmininpts], \
+               self.freqaxis[self.freqmaxinpts], \
+               self.freqaxis[1] - self.freqaxis[0], \
+               self.freqmaxinpts - self.freqmininpts
+
+
+    def setreftc(self, reftc):
+        self.reftc = reftc + 0.0
+        self.prepreftc = self.preptc(self.reftc)
+
+        # get frequency axis, etc
+        self.freqaxis, self.thecoherence = sp.signal.coherence(self.prepreftc,
+                                                               self.prepreftc,
+                                                               fs=self.Fs)
+        #                                                       window=self.windowfunc)'''
+        self.similarityfunclen = len(self.thecoherence)
+        self.similarityfuncorigin = 0
+        self.freqaxisvalid = True
+        self.datavalid = False
+        if self.freqmin is None or self.freqmax is None:
+            self.setlimits(self.freqaxis[0], self.freqaxis[-1])
+        self.freqmininpts = tide_util.valtoindex(self.freqaxis, self.freqmin,
+                                                 discretization='floor',
+                                                 debug=self.debug)
+        self.freqmaxinpts = tide_util.valtoindex(self.freqaxis, self.freqmax,
+                                                 discretization='ceiling',
+                                                 debug=self.debug)
+
+
+    def trim(self, vector):
+        return vector[self.freqmininpts:self.freqmaxinpts]
+
+
+    def run(self, thetc, trim=True, alt=False):
+        if len(thetc) != len(self.reftc):
+            print('timecourses are of different sizes:', len(thetc), '!=', len(self.reftc), '- exiting')
+            sys.exit()
+
+        self.testtc = thetc + 0.0
+        self.preptesttc = self.preptc(self.testtc)
+
+        # now actually do the coherence
+        if self.debug:
+            fig = plt.figure()
+            ax = fig.add_subplot(111)
+            plt.plot(self.prepreftc, 'r')
+            plt.plot(self.preptesttc, 'b')
+            plt.legend(['reference', 'test timecourse'])
+            plt.show()
+
+        if not alt:
+            self.freqaxis, self.thecoherence = sp.signal.coherence(self.prepreftc,
+                                                                   self.preptesttc,
+                                                                   fs=self.Fs)
+        else:
+            self.freqaxis, self.thecsdxy = sp.signal.csd(10000.0 * self.prepreftc,
+                                                         10000.0 * self.preptesttc,
+                                                         fs=self.Fs,
+                                                         scaling='spectrum')
+            self.freqaxis, self.thecsdxx = sp.signal.csd(10000.0 * self.prepreftc,
+                                                         10000.0 * self.prepreftc,
+                                                         fs=self.Fs,
+                                                         scaling='spectrum')
+            self.freqaxis, self.thecsdyy = sp.signal.csd(10000.0 * self.preptesttc,
+                                                         10000.0 * self.preptesttc,
+                                                         fs=self.Fs,
+                                                         scaling='spectrum')
+            self.thecoherence = np.nan_to_num(abs(self.thecsdxy) ** 2 / (abs(self.thecsdxx) * abs(self.thecsdyy)))
+
+
+        self.similarityfunclen = len(self.thecoherence)
+        self.similarityfuncorigin = 0
+        self.datavalid = True
+
+        if trim:
+            if alt:
+                self.themax = np.argmax(self.thecoherence[self.freqmininpts:self.freqmaxinpts])
+                return self.trim(self.thecoherence), \
+                       self.trim(self.freqaxis), \
+                       self.themax, \
+                       self.trim(self.thecsdxx), \
+                       self.trim(self.thecsdyy), \
+                       self.trim(self.thecsdxy)
+            else:
+                self.themax = np.argmax(self.thecoherence[self.freqmininpts:self.freqmaxinpts])
+                return self.trim(self.thecoherence), \
+                       self.trim(self.freqaxis), \
+                       self.themax
+        else:
+            if alt:
+                self.themax = np.argmax(self.thecoherence)
+                return self.thecoherence, \
+                       self.freqaxis, \
+                       self.themax, \
+                       self.thecsdxx, \
+                       self.thecsdyy, \
+                       self.thecsdxy
+
+            else:
+                self.themax = np.argmax(self.thecoherence)
+                return self.thecoherence, \
+                       self.freqaxis, \
+                       self.themax
 
 
 class simfunc_fitter:

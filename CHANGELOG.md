@@ -1,6 +1,28 @@
 # History of changes
 
-## Version 2.0alpha4 (10/26/26)
+## Version 2.0alpha7 (12/1/20)
+* (rapidtide) Rapidtide can now run refinement passes until the change in the probe regressor falls below a specified mean square difference.  Set --convergencethresh to a positive number to invoke this (0.0005 is good).  Rapidtide will refine until the M.S.D. falls below this value, or you hit maxpasses (use --maxpasses NUM to set - default is 15).  This implements the procedure used in Champagne, A. A., et al., NeuroImage 187, 154–165 (2019).
+* (rapidtide) The PCA refinement algorithm has been improved to match the method described in Champagne, et al., and is now the default.
+
+## Version 2.0alpha6 (11/30/20)
+* (rapidtide) Completely revamped CIFTI I/O.  Should now read and write native CIFTI2 files (do not need to convert to NIFTI-2 in workbench).
+* (rapidtide) Better handling of motion files.
+* (rapidtide) Added coherence calculation.  Not quite working right yet.
+* (happy) Started adding BIDS output.
+* (tidepool) Fixed to work with Big Sur (macOS 11).
+
+## Version 2.0alpha5 (10/29/20)
+Much thanks to Taylor Salo for his continuing contributions, with several substantive improvements to code, documentation, and automatic testing, and generally helping devise a sensible release roadmap.
+* (rapidtide, happy) Switched to using nilearn's mask generator for automatic mask generation, since it's much more sophisticated.  It seems to be a big improvement, and handles data processed by fmriprep and SPM with no fiddling.
+* (rapidtide, happy) General improvement of output of floating point numbers.  Limit to 3 decimal places.
+* (rapidtide) Use logging module for output.
+* (rapidtide, rapidtide_legacy) Options file is now always saved as a json.
+* (rapidtide) Added ability to autochoose an appropriate spatial filter by setting --spatialfilt to a negative value.
+* (rapidtide_parser) Code cleanup and formatting fixes.
+* (documentation) Much reorganization, reformatting and cleanup.
+* (documentation) New "theory of operation" section for rapidtide.  Still working on it.
+
+## Version 2.0alpha4 (10/26/20)
 * rapidtide2x has been renamed to rapidtide2x_legacy
 * (rapidtide, rapidtide2x) The options file is now always saved in .json format.
 * (rapidtide) BIDS format output naming and file structures have been updated to be more compliant with the standard.

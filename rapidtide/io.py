@@ -75,6 +75,65 @@ if nibabelexists:
         return nim, nim_data, nim_hdr, thedims, thesizes
 
 
+    def readfromcifti(inputfile, debug=False):
+        r"""Open a cifti file and read in the various important parts
+
+        Parameters
+        ----------
+        inputfile : str
+            The name of the cifti file.
+
+        Returns
+        -------
+        nim : nifti image structure
+        nim_data : array-like
+        nim_hdr : nifti header
+        thedims : int array
+        thesizes : float array
+
+        """
+        if os.path.isfile(inputfile):
+            inputfilename = inputfile
+        elif os.path.isfile(inputfile + '.nii'):
+            inputfilename = inputfile + '.nii'
+        else:
+            print('cifti file', inputfile, 'does not exist')
+            sys.exit()
+
+        cifti = nib.load(inputfilename)
+        nifti_data = np.transpose(cifti.get_fdata(dtype=np.float32))
+        cifti_hdr = cifti.header
+        nifti_hdr = cifti.nifti_header
+
+        if nifti_hdr['intent_code'] == 3002:
+            timestep, starttime = getciftitr(cifti_hdr)
+        else:
+            timestep, starttime = None, None
+        axes = [cifti_hdr.get_axis(i) for i in range(cifti.ndim)]
+        if debug:
+            for theaxis in axes:
+                print(theaxis)
+
+        thedims = nifti_hdr['dim'].copy()
+        thesizes = nifti_hdr['pixdim'].copy()
+        return cifti, cifti_hdr, nifti_data, nifti_hdr, thedims, thesizes, timestep
+
+
+    def getciftitr(cifti_hdr):
+        seriesaxis = None
+        for theaxis in cifti_hdr.matrix.mapped_indices:
+            if isinstance(cifti_hdr.matrix.get_axis(theaxis), nib.cifti2.SeriesAxis):
+                seriesaxis = theaxis
+        if seriesaxis is not None:
+            timepoint1 = cifti_hdr.matrix.get_axis(seriesaxis).get_element(1)
+            starttime = cifti_hdr.matrix.get_axis(seriesaxis).get_element(0)
+            timestep = timepoint1 - starttime
+        else:
+            print('No series axis found!  Exiting')
+            sys.exit()
+        return timestep, starttime
+
+
     # dims are the array dimensions along each axis
     def parseniftidims(thedims):
         r"""Split the dims array into individual elements
@@ -173,6 +232,105 @@ if nibabelexists:
 
         output_nifti.to_filename(thename + suffix)
         output_nifti = None
+
+
+    def savetocifti(thearray, theciftiheader, theniftiheader, thename,
+                    isseries=False,
+                    names=['placeholder'],
+                    start=0.0,
+                    step=1.0,
+                    debug=False):
+        r""" Save a data array out to a cifti
+
+        Parameters
+        ----------
+        thearray : array-like
+            The data array to save.
+        theciftiheader : cifti header
+            A valid cifti header
+        theniftiheader : nifti header
+            A valid nifti header
+        thename : str
+            The name of the cifti file to save
+        isseries: bool
+            True if output is a dtseries, False if dtscalar
+        start: float
+            starttime in seconds
+        step: float
+            timestep in seconds
+        debug: bool
+            Print extended debugging information
+
+        Returns
+        -------
+
+        """
+        if debug:
+            print('savetocifti:', thename)
+        workingarray = np.transpose(thearray)
+        if len(workingarray.shape) == 1:
+            workingarray = workingarray.reshape((1, -1))
+
+        # find the BrainModelAxis from the input file
+        modelaxis = None
+        for theaxis in theciftiheader.matrix.mapped_indices:
+            if isinstance(theciftiheader.matrix.get_axis(theaxis), nib.cifti2.BrainModelAxis):
+                modelaxis = theaxis
+                if debug:
+                    print('axis', theaxis, 'is the BrainModelAxis')
+
+        # process things differently for dscalar and dtseries files
+        if isseries:
+            # make a proper series header
+            if debug:
+                print('dtseries path: workingarray shape', workingarray.shape)
+            theintent = 'NIFTI_INTENT_CONNECTIVITY_DENSE_SERIES'
+            theintentname = "ConnDenseSeries"
+            if modelaxis is not None:
+                seriesaxis = nib.cifti2.cifti2_axes.SeriesAxis(start, step, workingarray.shape[0])
+                axislist = [seriesaxis, theciftiheader.matrix.get_axis(modelaxis)]
+            else:
+                print('no BrainModelAxis found in source file - exiting')
+                sys.exit()
+        else:
+            # make a proper scalar header
+            if debug:
+                print('dscalar path: workingarray shape', workingarray.shape)
+            theintent = 'NIFTI_INTENT_CONNECTIVITY_DENSE_SCALARS'
+            theintentname = "ConnDenseScalar"
+            if len(names) != workingarray.shape[0]:
+                print('savetocifti - number of supplied names does not match array size - exiting.')
+                sys.exit()
+            if modelaxis is not None:
+                scalaraxis = nib.cifti2.cifti2_axes.ScalarAxis(names)
+                axislist = [scalaraxis, theciftiheader.matrix.get_axis(modelaxis)]
+            else:
+                print('no BrainModelAxis found in source file - exiting')
+                sys.exit()
+        # now create the output file structure
+        if debug:
+            print('about to create cifti image - nifti header is:', theniftiheader)
+
+        img = nib.cifti2.Cifti2Image(dataobj=workingarray,
+                                     header=axislist)
+
+        # make the header right
+        img.nifti_header.set_intent(theintent, name=theintentname)
+        img.update_headers()
+
+        if isseries:
+            suffix = '.dtseries.nii'
+            if debug:
+                print('\tDENSE_SERIES')
+        else:
+            suffix = '.dscalar.nii'
+            if debug:
+                print('\tDENSE_SCALARS')
+        if debug:
+            print('after update_headers() - nifti header is:', theniftiheader)
+
+        # save the data
+        nib.cifti2.save(img, thename + suffix)
 
 
     def checkifnifti(filename):
@@ -285,6 +443,35 @@ if nibabelexists:
         else:
             output_data = infile_data[:, :, :, startpt:startpt + numpoints]
         savetonifti(output_data, theheader, outputfile)
+
+
+    def checkifcifti(filename, debug=False):
+        r"""Check to see if the specified file is CIFTI format
+
+        Parameters
+        ----------
+        filename : str
+            The file name
+
+        Returns
+        -------
+        iscifti : bool
+            True if the file header indicates this is a CIFTI file
+
+        """
+        theimg = nib.load(filename)
+        thedict = vars(theimg)
+        if debug:
+            print('thedict:', thedict)
+        try:
+            intent = thedict['_nifti_header']['intent_code']
+            if debug:
+                print('intent found')
+            return intent >= 3000 and intent < 3100
+        except KeyError:
+            if debug:
+                print('intent not found')
+            return False
 
 
     def checkiftext(filename):
@@ -500,7 +687,7 @@ def readparfile(filename):
     return motiondict
 
 
-def readmotion(filename, colspec=None):
+def readmotion(filename):
     r"""Reads motion regressors from filename (from the columns specified in colspec, if given)
 
     Parameters
@@ -516,14 +703,47 @@ def readmotion(filename, colspec=None):
         All the timecourses in the file, keyed by name
 
     """
-    labels = ['X', 'Y', 'Z', 'RotX', 'RotY', 'RotZ']
+    # read in the motion timecourses
+    print('reading motion timecourses...')
+    filebase, extension = os.path.splitext(filename)
+    if extension == '.par':
+        allmotion = readvecs(filename)
+        motiondict = {}
+        motiondict['xtrans'] = allmotion[3, :] * 1.0
+        motiondict['ytrans'] = allmotion[4, :] * 1.0
+        motiondict['ztrans'] = allmotion[5, :] * 1.0
+        motiondict['maxtrans'] = np.max([np.max(motiondict['xtrans']), np.max(motiondict['ytrans']), np.max(motiondict['ztrans'])])
+        motiondict['mintrans'] = np.min([np.min(motiondict['xtrans']), np.min(motiondict['ytrans']), np.min(motiondict['ztrans'])])
+        motiondict['xrot'] = allmotion[0, :] * 1.0
+        motiondict['yrot'] = allmotion[1, :] * 1.0
+        motiondict['zrot'] = allmotion[2, :] * 1.0
+        motiondict['maxrot'] = np.max([np.max(motiondict['xrot']), np.max(motiondict['yrot']), np.max(motiondict['zrot'])])
+        motiondict['minrot'] = np.min([np.min(motiondict['xrot']), np.min(motiondict['yrot']), np.min(motiondict['zrot'])])
+    elif extension == '.tsv':
+        allmotion = readfmriprepconfounds(filebase)
+        motiondict = {}
+        motiondict['xtrans'] = allmotion['trans_x'] * 1.0
+        motiondict['ytrans'] = allmotion['trans_y'] * 1.0
+        motiondict['ztrans'] = allmotion['trans_z'] * 1.0
+        motiondict['maxtrans'] = np.max([np.max(motiondict['xtrans']), np.max(motiondict['ytrans']), np.max(motiondict['ztrans'])])
+        motiondict['mintrans'] = np.min([np.min(motiondict['xtrans']), np.min(motiondict['ytrans']), np.min(motiondict['ztrans'])])
+        motiondict['xrot'] = allmotion['rot_x'] * 1.0
+        motiondict['yrot'] = allmotion['rot_y'] * 1.0
+        motiondict['zrot'] = allmotion['rot_z'] * 1.0
+        motiondict['maxrot'] = np.max([np.max(motiondict['xrot']), np.max(motiondict['yrot']), np.max(motiondict['zrot'])])
+        motiondict['minrot'] = np.min([np.min(motiondict['xrot']), np.min(motiondict['yrot']), np.min(motiondict['zrot'])])
+    else:
+        print('cannot read files with extension', extension)
+        sys.exit()
+    '''
+    motionlen = motiondict['xtrans'].shape[0]
     motiontimeseries = readvecs(filename, colspec=colspec)
     if motiontimeseries.shape[0] != 6:
         print('readmotion: expect 6 motion regressors', motiontimeseries.shape[0], 'given')
         sys.exit()
     motiondict = {}
     for j in range(0, 6):
-        motiondict[labels[j]] = 1.0 * motiontimeseries[j, :]
+        motiondict[labels[j]] = 1.0 * motiontimeseries[j, :]'''
     return motiondict
 
 
@@ -541,7 +761,7 @@ def calcmotregressors(motiondict, start=0, end=-1, position=True, deriv=True, de
         All the derivative timecourses to use in a numpy array
 
     """
-    labels = ['X', 'Y', 'Z', 'RotX', 'RotY', 'RotZ']
+    labels = ['xtrans', 'ytrans', 'ztrans', 'xrot', 'yrot', 'zrot']
     numpoints = len(motiondict[labels[0]])
     if end == -1:
         end = numpoints - 1
@@ -561,19 +781,23 @@ def calcmotregressors(motiondict, start=0, end=-1, position=True, deriv=True, de
         print('no output types selected - exiting')
         sys.exit()
     activecolumn = 0
+    outlabels = []
     if position:
         for thelabel in labels:
             outputregressors[activecolumn, :] = motiondict[thelabel][start:end + 1]
+            outlabels.append(thelabel)
             activecolumn += 1
     if deriv:
         for thelabel in labels:
             outputregressors[activecolumn, 1:] = np.diff(motiondict[thelabel][start:end + 1])
+            outlabels.append(thelabel + '_deriv')
             activecolumn += 1
     if derivdelayed:
         for thelabel in labels:
             outputregressors[activecolumn, 2:] = np.diff(motiondict[thelabel][start:end + 1])[1:]
+            outlabels.append(thelabel + '_delayedderiv')
             activecolumn += 1
-    return outputregressors
+    return outputregressors, outlabels
 
 
 def sliceinfo(slicetimes, tr):

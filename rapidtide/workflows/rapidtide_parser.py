@@ -46,7 +46,6 @@ def _get_parser():
     parser = argparse.ArgumentParser(
         prog="rapidtide",
         description=("Perform a RIPTiDe time delay analysis on a dataset."),
-        usage="%(prog)s in_file outputname [options]",
     )
 
     # Required arguments
@@ -73,8 +72,7 @@ def _get_parser():
             "arguments. "
             "Any parameter set by an analysis type can be overridden "
             "by setting that parameter explicitly. "
-            "Analysis types are mutually exclusive with one another, "
-            "but may be combined with 'Macros'."
+            "Analysis types are mutually exclusive with one another."
         ),
     ).add_mutually_exclusive_group()
     analysis_type.add_argument(
@@ -112,8 +110,7 @@ def _get_parser():
             "Single arguments that change default values for many "
             "arguments. "
             "Macros override individually set parameters. "
-            "Macros are mutually exclusive with one another, but may "
-            "be combined with 'Analysis Types'."
+            "Macros are mutually exclusive with one another."
         ),
     ).add_mutually_exclusive_group()
     macros.add_argument(
@@ -229,36 +226,6 @@ def _get_parser():
     # Add permutation options
     pf.addpermutationopts(parser)
 
-    """permutationmethod = preproc.add_mutually_exclusive_group()
-    permutationmethod.add_argument(
-            '--permutationmethod',
-            dest='permutationmethod',
-            action='store',
-            type=str,
-            choices=['shuffle', 'phaserandom'],
-            help=('Permutation method for significance testing.  '
-                  'Default is shuffle. '),
-            default='shuffle')
-    preproc.add_argument(
-            '--numnull',
-             dest='numestreps',
-             action='store',
-             type=int,
-             metavar='NREPS',
-             help=('Estimate significance threshold by running '
-                   'NREPS null correlations (default is 10000, '
-                   'set to 0 to disable). If you are '
-                   'running multiple passes, "ampthresh" (see below) '
-                   'will be set to the 0.05 significance level.'),
-             default=10000)
-    preproc.add_argument(
-            '--skipsighistfit',
-            dest='dosighistfit',
-            action='store_false',
-            help=('Do not fit significance histogram with a '
-               'Johnson SB function. '),
-            default=True)"""
-
     wfunc = preproc.add_mutually_exclusive_group()
     wfunc.add_argument(
         "--windowfunc",
@@ -302,7 +269,9 @@ def _get_parser():
         metavar="GAUSSSIGMA",
         help=(
             "Spatially filter fMRI data prior to analysis "
-            "using GAUSSSIGMA in mm."
+            "using GAUSSSIGMA in mm.  Set GAUSSSIGMA negative "
+            "to have rapidtide set it to half the mean voxel "
+            "dimension (a rule of thumb for a good value)."
         ),
         default=0.0,
     )
@@ -317,9 +286,7 @@ def _get_parser():
         ),
         default=False,
     )
-
-    globalmethod = preproc.add_mutually_exclusive_group()
-    globalmethod.add_argument(
+    preproc.add_argument(
         "--globalmaskmethod",
         dest="globalmaskmethod",
         action="store",
@@ -331,7 +298,6 @@ def _get_parser():
         ),
         default="mean",
     )
-
     preproc.add_argument(
         "--globalmeaninclude",
         dest="globalmeanincludespec",
@@ -357,15 +323,11 @@ def _get_parser():
     preproc.add_argument(
         "--motionfile",
         dest="motionfilespec",
-        metavar="MASK[:VALSPEC]",
+        metavar="MOTFILE",
         help=(
-            "Read 6 columns of motion regressors out of MOTFILE text file. "
+            "Read 6 columns of motion regressors out of MOTFILE file (.par or BIDS .json) "
             "(with timepoints rows) and regress their derivatives "
             "and delayed derivatives out of the data prior to analysis. "
-            "If COLSPEC is present, use the comma separated list of ranges to "
-            "specify X, Y, Z, RotX, RotY, and RotZ, in that order.  For  "
-            "example, :3-5,7,0,9 would use columns 3, 4, 5, 7, 0 and 9 "
-            "for X, Y, Z, RotX, RotY, RotZ, respectively."
         ),
         default=None,
     )
@@ -524,9 +486,7 @@ def _get_parser():
         ),
         default=0.0,
     )
-
-    cc_group = corr.add_mutually_exclusive_group()
-    cc_group.add_argument(
+    corr.add_argument(
         "--corrweighting",
         dest="corrweighting",
         action="store",
@@ -853,16 +813,45 @@ def _get_parser():
         help=("Only use negative lags for regressor refinement."),
         default="both",
     )
-
     reg_ref.add_argument(
         "--refinetype",
         dest="refinetype",
         action="store",
         type=str,
         choices=["pca", "ica", "weighted_average", "unweighted_average"],
-        help=("Method with which to derive refined regressor."),
-        default="unweighted_average",
+        help=("Method with which to derive refined regressor (default is 'pca'"),
+        default="pca",
     )
+    reg_ref.add_argument(
+        "--PCAtarget",
+        dest="PCAtarget",
+        action="store",
+        type=float,
+        metavar="FRAC",
+        help=("PCA during refinement will attempt to explain FRAC of the total variance."
+              "Default is 0.8."),
+        default=0.8,
+    )
+    reg_ref.add_argument(
+        "--convergencethresh",
+        dest="convergencethresh",
+        action="store",
+        type=float,
+        metavar="THRESH",
+        help=("Continue refinement until the MSE between regressors becomes <= THRESH.  "
+              "By default, this is not set, so refinement will run for the specified number of passes"),
+        default=None,
+    )
+    reg_ref.add_argument(
+        "--maxpasses",
+        dest="maxpasses",
+        action="store",
+        type=int,
+        metavar="MAXPASSES",
+        help=("Terminate refinement after MAXPASSES passes, whether or not convergence has occured. Default is 15"),
+        default=15,
+    )
+
 
     # Output options
     output = parser.add_argument_group("Output options")
@@ -937,6 +926,16 @@ def _get_parser():
         ),
         default=True,
     )
+    output.add_argument(
+        "--calccoherence",
+        dest="calccoherence",
+        action="store_true",
+        help=(
+            "Calculate and save the coherence between the final regressor and the data."
+        ),
+        default=False,
+    )
+
 
     # Miscellaneous options
     misc = parser.add_argument_group("Miscellaneous options")
@@ -1052,6 +1051,13 @@ def _get_parser():
             "worker processes to n_cpus - 1."
         ),
         default=1,
+    )
+    misc.add_argument(
+        "--version",
+        dest="printversion",
+        action="store_true",
+        help=("Print version information and exit."),
+        default=False,
     )
     misc.add_argument(
         "--debug",
@@ -1280,15 +1286,12 @@ def process_args(inputargs=None):
     args["dosighistfit"] = True
 
     # output options
-    args["savecorrmask"] = True
     args["savedespecklemasks"] = True
     args["saveglmfiltered"] = True
     args["savemotionfiltered"] = False
     args["savecorrmask"] = True
-    args["histlen"] = 250
 
     # refinement options
-    args["estimatePCAdims"] = False
     args["filterbeforePCA"] = True
     args["dispersioncalc_step"] = 0.50
 
@@ -1408,7 +1411,10 @@ def process_args(inputargs=None):
     if args["realtr"] != "auto":
         fmri_tr = float(args["realtr"])
     else:
-        fmri_tr = nib.load(args["in_file"]).header.get_zooms()[3]
+        if tide_io.checkifcifti(args["in_file"]):
+            fmri_tr, dummy = tide_io.getciftitr(nib.load(args["in_file"]).header)
+        else:
+            fmri_tr = nib.load(args["in_file"]).header.get_zooms()[3]
     args["realtr"] = fmri_tr
 
     if args["inputfreq"] == "auto":
