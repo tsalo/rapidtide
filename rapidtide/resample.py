@@ -24,51 +24,21 @@ import time
 
 import numpy as np
 import pyfftw
+import pyfftw.interfaces.scipy_fftpack as fftpack
 import pylab as pl
 import scipy as sp
-from numba import jit
-from scipy import fftpack, signal
+from scipy import signal
 
 import rapidtide.filter as tide_filt
 import rapidtide.fit as tide_fit
 import rapidtide.util as tide_util
 
-fftpack = pyfftw.interfaces.scipy_fftpack
 pyfftw.interfaces.cache.enable()
 
 # this is here until numpy deals with their fft issue
 import warnings
 
 warnings.simplefilter(action="ignore", category=RuntimeWarning)
-
-# ---------------------------------------- Global constants -------------------------------------------
-donotusenumba = False
-donotbeaggressive = True
-
-# ----------------------------------------- Conditional imports ---------------------------------------
-
-
-def conditionaljit():
-    def resdec(f):
-        if donotusenumba:
-            return f
-        return jit(f, nopython=False)
-
-    return resdec
-
-
-def conditionaljit2():
-    def resdec(f):
-        if donotusenumba or donotbeaggressive:
-            return f
-        return jit(f, nopython=False)
-
-    return resdec
-
-
-def disablenumba():
-    global donotusenumba
-    donotusenumba = True
 
 
 # --------------------------- Resampling and time shifting functions -------------------------------------------
@@ -249,6 +219,7 @@ def congrid(xaxis, loc, val, width, kernel="kaiser", cyclic=True, debug=False):
 
 
 class FastResampler:
+    """"""
     def __init__(
         self,
         timeaxis,
@@ -344,8 +315,9 @@ class FastResampler:
 
 
 def doresample(orig_x, orig_y, new_x, method="cubic", padlen=0, antialias=False, debug=False):
-    """
-    Resample data from one spacing to another.  By default, does not apply any antialiasing filter.
+    """Resample data from one spacing to another.
+
+    By default, does not apply any antialiasing filter.
 
     Parameters
     ----------
@@ -353,11 +325,16 @@ def doresample(orig_x, orig_y, new_x, method="cubic", padlen=0, antialias=False,
     orig_y
     new_x
     method
-    padlen
+    padlen : int, optional
+        Default is 0.
+    antialias : bool, optional
+        Default is False.
+    debug : bool, optional
+        Default is False.
 
     Returns
     -------
-
+    resampled_x
     """
     tstep = orig_x[1] - orig_x[0]
     if padlen > 0:
@@ -393,21 +370,18 @@ def doresample(orig_x, orig_y, new_x, method="cubic", padlen=0, antialias=False,
 
     if method == "cubic":
         cj = signal.cspline1d(pad_y)
-        # return tide_filt.unpadvec(
-        #   np.float64(signal.cspline1d_eval(cj, new_x, dx=(orig_x[1] - orig_x[0]), x0=orig_x[0])), padlen=padlen)
-        return signal.cspline1d_eval(cj, new_x, dx=(orig_x[1] - orig_x[0]), x0=orig_x[0])
+        resampled_x = signal.cspline1d_eval(cj, new_x, dx=(orig_x[1] - orig_x[0]), x0=orig_x[0])
     elif method == "quadratic":
         qj = signal.qspline1d(pad_y)
-        # return tide_filt.unpadvec(
-        #    np.float64(signal.qspline1d_eval(qj, new_x, dx=(orig_x[1] - orig_x[0]), x0=orig_x[0])), padlen=padlen)
-        return signal.qspline1d_eval(qj, new_x, dx=(orig_x[1] - orig_x[0]), x0=orig_x[0])
+        resampled_x = signal.qspline1d_eval(qj, new_x, dx=(orig_x[1] - orig_x[0]), x0=orig_x[0])
     elif method == "univariate":
         interpolator = sp.interpolate.UnivariateSpline(pad_x, pad_y, k=3, s=0)  # s=0 interpolates
-        # return tide_filt.unpadvec(np.float64(interpolator(new_x)), padlen=padlen)
-        return np.float64(interpolator(new_x))
+        resampled_x = np.float64(interpolator(new_x))
     else:
         print("invalid interpolation method")
-        return None
+        resampled_x = None
+
+    return resampled_x
 
 
 def arbresample(
@@ -615,9 +589,13 @@ def calcsliceoffset(sotype, slicenum, numslices, tr, multiband=1):
     ----------
     sotype
     slicenum
-    numslices
-    tr
-    multiband
+    numslices : int
+        Number of slices.
+    tr : float
+        Repetition time, in seconds.
+    multiband : int, optional
+        Multiband factor. If multiband acceleration is not applied, then use 1.
+        Default is 1.
 
     Returns
     -------
@@ -710,8 +688,6 @@ def calcsliceoffset(sotype, slicenum, numslices, tr, multiband=1):
     return slicetime
 
 
-# NB: a positive value of shifttrs delays the signal, a negative value advances it
-# timeshift using fourier phase multiplication
 def timeshift(inputtc, shifttrs, padtrs, doplot=False, debug=False):
     """
 
@@ -725,6 +701,10 @@ def timeshift(inputtc, shifttrs, padtrs, doplot=False, debug=False):
     Returns
     -------
 
+    Notes
+    -----
+    A positive value of shifttrs delays the signal, a negative value advances it
+    timeshift using fourier phase multiplication
     """
     # set up useful parameters
     thelen = np.shape(inputtc)[0]
@@ -792,6 +772,24 @@ def timeshift(inputtc, shifttrs, padtrs, doplot=False, debug=False):
 
 
 def timewarp(orig_x, orig_y, timeoffset, demean=True, method="univariate", debug=False):
+    """
+
+    Parameters
+    ----------
+    orig_x
+    orig_y
+    timeoffset
+    demean : bool, optional
+        Default is True.
+    method : str, optional
+        Default is 'univariate'.
+    debug : bool, optional
+        Default is False.
+
+    Returns
+    -------
+
+    """
     if demean:
         demeanedoffset = timeoffset - np.mean(timeoffset)
         if debug:
