@@ -13,9 +13,10 @@
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 
-import sys
 import os
+import sys
 from datetime import datetime
+
 from m2r import MdInclude
 
 # If extensions (or modules to document with autodoc) are in another directory,
@@ -24,8 +25,8 @@ from m2r import MdInclude
 sys.path.insert(0, os.path.abspath("sphinxext"))
 sys.path.insert(0, os.path.abspath("../rapidtide"))
 
-from github_link import make_linkcode_resolve
 import rapidtide
+from github_link import make_linkcode_resolve
 
 # -- General configuration ------------------------------------------------
 
@@ -57,8 +58,9 @@ extensions = [
     "sphinx_gallery.gen_gallery",
 ]
 
-import sphinx
 from distutils.version import LooseVersion
+
+import sphinx
 
 if LooseVersion(sphinx.__version__) < LooseVersion("1.4"):
     extensions.append("sphinx.ext.pngmath")
@@ -182,7 +184,7 @@ html_static_path = ["_static"]
 
 # https://github.com/rtfd/sphinx_rtd_theme/issues/117
 def setup(app):
-    app.add_stylesheet("theme_overrides.css")
+    app.add_css_file("theme_overrides.css")
     # Fix to https://github.com/sphinx-doc/sphinx/issues/7420
     # from https://github.com/life4/deal/commit/7f33cbc595ed31519cefdfaaf6f415dada5acd94
     # from m2r to make `mdinclude` work
