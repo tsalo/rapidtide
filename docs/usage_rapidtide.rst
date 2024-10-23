@@ -6,8 +6,8 @@ Description:
 
 The central program in this package is rapidtide.  This is the program that
 calculates a similarity function between a "probe" signal and every voxel of
-a BOLD fMRI dataset.  It then determines the peak value, time delay, and wi
-dth of the similarity function to determine when and how strongly that probe
+a BOLD fMRI dataset.  It then determines the peak value, time delay, and
+width of the similarity function to determine when and how strongly that probe
 signal appears in each voxel.
 
 At its core, rapidtide is simply performing a full crosscorrelation between a
@@ -78,6 +78,7 @@ BIDS Outputs:
     "XXX_RUNNING", "txt", "Run status file", "If rapidtide was started, but has not yet successfully completed"
     "XXX_commandline", "txt", "Raw command line used to invoke rapidtide", "Always"
     "XXX_desc-autocorr_timeseries", "tsv.gz, json", "Autocorrelation of the probe regressor for each pass", "Always"
+    "XXX_desc-brainmask_mask", "nii.gz, json", "Brain mask", "Present if '--brainmask' is set"
     "XXX_desc-cleansimdistdata_info", "tsv.gz, json", "Individual sham correlation datapoints after outlier removal", "Present if numnull > 0"
     "XXX_desc-confoundfilterCleaned_bold", "nii.gz, json", "fMRI data after motion/confound regression", "Present if doing motion/confound regression and outputlevel is max"
     "XXX_desc-confoundfilterR2_hist", "tsv.gz, json", "Histogram of confound filter R2 values", "Present if doing motion/confound regression"
@@ -87,12 +88,14 @@ BIDS Outputs:
     "XXX_desc-corrfitwindow_info", "nii.gz, json", "The search window for the correlation peak fit", "Present if outputlevel is max"
     "XXX_desc-corrout_info", "nii.gz, json", "Correlation function", "Present if outputlevel is ≥ normal"
     "XXX_desc-corrtimes_timeseries", "tsv.gz, json", "", "Present if outputlevel is max"
+    "XXX_desc-CoV_map", "nii.gz, json", "Coefficient of variation of the data", "Always"
     "XXX_desc-despeckle_mask", "nii.gz, json", "Voxels that underwent despeckling in the final pass", "Present if despecklepasses > 0 (default) and outputlevel is max"
     "XXX_desc-expandedconfounds_timeseries", "tsv.gz, json", "The expanded (via derivatives and powers) set of confound regressors used for prefiltering the data", "Present if doing motion/confound regression"
     "XXX_desc-formattedruntimings_info", "tsv", "No description", "Always"
     "XXX_desc-gaussout_info", "nii.gz, json", "Simulated correlation function", "Present if outputlevel is max"
     "XXX_desc-globallag_hist", "tsv.gz, json", "Histogram of lag times from global lag calculation", "Always"
     "XXX_desc-globalmean_mask", "nii.gz, json", "Voxels used to calculate global mean", "Always"
+    "XXX_desc-GM_mask", "nii.gz, json", "Gray matter mask", "Present if '--graymattermask' is set"
     "XXX_desc-initialmovingregressor_timeseries", "tsv.gz, json", "The raw and filtered initial probe regressor, at the original sampling resolution", "Always"
     "XXX_desc-lagtcgenerator_timeseries", "tsv.gz, json", "The lagged timecourse generator", "Present if passes > 1"
     "XXX_desc-lfofilterCleaned_bold", "nii.gz, json", "fMRI data with sLFO signal filtered out", "Present if GLM is enabled (default) and outputlevel is ≥ less"
@@ -137,9 +140,12 @@ BIDS Outputs:
     "XXX_desc-runoptions_info", "json", "A detailed dump of all internal variables in the program.  Useful for debugging and data provenance.", "Always"
     "XXX_desc-shiftedtcs_bold", "nii.gz, json", "The filtered input fMRI data, in voxels used for refinement, time shifted by the negated delay in every voxel so that the moving blood component is aligned.", "Present if passes > 1 and outputlevel is max"
     "XXX_desc-simdistdata_info", "tsv.gz, json", "Individual sham correlation datapoints", "Present if numnull > 0"
+    "XXX_desc-sLFOamplitude_timeseries", "tsv.gz, json", "Filtered RMS amplitude of the probe regressor, and a linear fit", "???"
+    "XXX_desc-std_map", "nii.gz, json", "Voxelwise standard deviation of the data", "Always"
     "XXX_desc-timepercentile_map", "nii.gz, json", "Percentile ranking of this voxels delay", "Always"
     "XXX_desc-trimmedcorrtimes_timeseries", "tsv.gz, json", "", "Present if outputlevel is max"
     "XXX_desc-trimmedmitimes_timeseries", "tsv.gz, json", "", "Present if outputlevel is max"
+    "XXX_desc-WM_mask", "nii.gz, json", "White matter mask", "Present if '--whitemattermask' is set"
     "XXX_formattedcommandline", "txt", "Command line used to invoke rapidtide, nicely formatted", "Always"
     "XXX_log", "txt", "Diagnostic log file with a lot of informational output", "Always"
     "XXX_memusage", "tsv", "Memory usage statistics for performance tuning", "Always"
