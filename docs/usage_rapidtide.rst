@@ -238,17 +238,26 @@ analysis.
 ..
 
 
-PRO TIP:  Extraction of the sLFO regressor and calculation of the delay and strength maps take the VAST majority of
-the computation time, and generates only a small fraction of the data of a full analysis.
-If you are doing computation on AWS (where compute is cheap, storage is semi-pricey,and download costs are extortionate), it makes
-sense to do everything except GLM filtering on your data, and download or store the outputs of that, only doing the
-GLM step at the time when you need to do it.  For example - running rapidtide on all of the HCP-YA resting state data
-generates less than 70GB of output data.  That's not too expensive to download, or store on S3, and costs nothing to
-upload.  The denoised data, however is huge (bigger than the input dataset), so you don't want to download it or even
-pay to store it for too long.  So make it when you need it, use it for whatever,
-then throw it away, and make it again if you need it again.
-This will save you an enormous amount of money.
+.. tip::
 
+    Extraction of the sLFO regressor and calculation of the delay and strength maps take the
+    VAST majority of the computation time,
+    and generates only a small fraction of the data of a full analysis.
+
+    If you are doing computation on AWS
+    (where compute is cheap, storage is semi-pricey,and download costs are extortionate),
+    it makes sense to do everything except GLM filtering on your data,
+    and download or store the outputs of that,
+    only doing the GLM step at the time when you need to do it.
+
+    For example -
+    running rapidtide on all of the HCP-YA resting state data generates less than 70GB of output data.
+    That's not too expensive to download, or store on S3, and costs nothing to upload.
+    The denoised data, however is huge (bigger than the input dataset),
+    so you don't want to download it or even pay to store it for too long.
+    So make it when you need it, use it for whatever, then throw it away,
+    and make it again if you need it again.
+    This will save you an enormous amount of money.
 
 
 Usage:
